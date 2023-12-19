@@ -129,7 +129,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
                         drawhud = false,
                         drawmonitors = false,
                         drawviewmodel = false,
-                        bloomtone = true
+                        bloomtone = true,
+                        viewid = 1 -- VIEW_3DSKY
                         --zfar = 1500
                     } )
                 wp.drawing = false
