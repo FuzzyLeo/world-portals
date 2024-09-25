@@ -117,7 +117,12 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
                 local camAngle = wp.TransformPortalAngle( plyAngle, portal, exitPortal )
 
                 local zfar = portal:GetZFar()
-                if zfar <= 0 then
+                if zfar > 0 then
+                    local relative_pos = plyOrigin - portal:GetPos()
+                    local portal_to_exit_dist = exitPortal:GetPos():Distance(portal:GetPos())
+                    local adjusted_zfar = portal_to_exit_dist + relative_pos:Dot(portal:GetForward())
+                    zfar = math.max(adjusted_zfar, zfar)
+                else
                     zfar = nil
                 end
 
