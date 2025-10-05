@@ -56,7 +56,7 @@ function ENT:Draw()
             render.SetStencilCompareFunction( STENCIL_ALWAYS )
         end
 
-        local transparency =  120 --self:GetTransparency()
+        local transparency = self:GetTransparency()
         if transparency > 0 then
             render.SetMaterial( wp.matTrans )
         else
