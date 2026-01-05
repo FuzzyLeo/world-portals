@@ -3,6 +3,14 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
+local res_cvar = CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals")
+
+local res = ((GetConVar("worldportals_resolution_percentage"):GetInt())/100)
+
+cvars.AddChangeCallback("worldportals_resolution_percentage", function(convar_name, value_old, value_new)
+    res = value_new/100
+end)
+
 function ENT:DrawPortal(exitPortal)
     if not (self:GetModel() == "models/error.mdl") then
         render.ModelMaterialOverride( wp.matInvis )
@@ -29,7 +37,7 @@ function ENT:Draw()
     if not IsValid(exitPortal) then return end
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
-    local width, height = ScrW(), ScrH()
+    local width, height = ScrW()*res, ScrH()*res
     local texture = GetRenderTarget("portal:" .. self:EntIndex() .. ":" .. width .. ":" .. height, width, height)
     self:SetTexture( texture )
 
