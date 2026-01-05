@@ -3,7 +3,7 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
-local res_cvar = CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "Doors - Render resolution percentage for portals")
+local res_cvar = CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals")
 
 local res = ((GetConVar("worldportals_resolution_percentage"):GetInt())/100)
 
