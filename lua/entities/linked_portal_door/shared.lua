@@ -38,15 +38,15 @@ end
 
 function ENT:Initialize()
     if SERVER then
-        self:SetTrigger( true )
+        self:SetTrigger(true)
+        self:SetOpen(true)
+        self:SetEnableTeleport(true)
     end
 
     self:SetMoveType( MOVETYPE_NONE )
     self:SetSolid( SOLID_OBB )
     self:SetNotSolid( true )
     self:SetCollisionGroup( COLLISION_GROUP_WORLD )
-    self:SetOpen(true)
-    self:SetEnableTeleport(true)
 
     self:DrawShadow( false )
 
