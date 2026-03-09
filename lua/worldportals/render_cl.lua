@@ -30,10 +30,11 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     if not camAngle then camAngle = EyeAngles() end
     if not camFOV then camFOV = LocalPlayer():GetFOV() end
     local exitPortal = portal:GetExit()
+    local falseWorld = portal:GetFalseWorld()
     local distance = camOrigin:Distance( portal:GetPos() )
     local disappearDist = portal:GetDisappearDist()
 
-    if not IsValid( exitPortal ) then return false end
+    if not IsValid( exitPortal ) and not falseWorld then return false end
     
     local override, drawblack = hook.Call( "wp-shouldrender", GAMEMODE, portal, exitPortal, camOrigin )
     if override ~= nil then return override, drawblack end
@@ -79,6 +80,36 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
     render.RenderView = WorldPortals_RenderView
 end)
 
+
+function wp.renderfalseworld(portal, plyOrigin, plyAngle, width, height, fov )
+    local texture = portal:GetTexture()
+    if wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
+        hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
+        render.PushRenderTarget( texture )
+                local oldW, oldH = ScrW(), ScrH()
+                local sizeX, sizeY = ScrW(), ScrH()
+                render.Clear( 0, 0, 0, 0, true, true )
+                render.SetViewPort( 0, 0, sizeX, sizeY )
+
+                local eyeOffset = plyOrigin
+                local oldFog = render.GetFogMode()
+                render.SuppressEngineLighting(true)
+                render.FogMode(MATERIAL_FOG_NONE)
+
+                PlyOriginLocal = plyOrigin - portal:GetPos()
+
+                wp.createfalseworld(portal, PlyOriginLocal, plyAngle, width, height, fov)
+
+                render.OverrideDepthEnable(false)
+                render.FogMode(oldFog)
+                render.SuppressEngineLighting(false)
+
+                render.SetViewPort( 0, 0, oldW, oldH )
+        render.PopRenderTarget()
+        hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
+    end
+end
+
 function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
     if ( wp.drawing ) then return end
     wp.portals = ents.FindByClass( "linked_portal_door" )
@@ -90,6 +121,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
 
     for _, portal in pairs( wp.portals ) do
         local exitPortal = portal:GetExit()
+        local falseWorld = portal:GetFalseWorld()
         local texture = portal:GetTexture()
         if IsValid(exitPortal) and wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
             hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
@@ -153,6 +185,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
             render.PopRenderTarget()
             
             hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
+        elseif falseWorld and wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
+            wp.renderfalseworld(portal, plyOrigin, plyAngle, width, height, fov )
         end
     end
     LocalPlayer():SetWeaponColor( oldWepColor )

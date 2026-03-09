@@ -5,6 +5,7 @@ wp = {}
 -- Load required files
 include( "worldportals/utils_sh.lua" )
 include( "worldportals/teleport_sh.lua" )
+include( "worldportals/falseworld_sh.lua" )
 
 if SERVER then
 
