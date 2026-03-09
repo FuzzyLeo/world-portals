@@ -14,7 +14,6 @@ wp.falseworlds.example = {
             model = "models/props_interiors/VendingMachineSoda01a.mdl",
             pos = Vector(-180,0,-3),
             angle = Angle(0,0,0)
-            scale = Ve
         },
         tower = {
             model = "models/props_phx/huge/tower.mdl",
