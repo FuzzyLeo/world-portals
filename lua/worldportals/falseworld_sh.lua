@@ -53,7 +53,7 @@ function wp.createfalseworld(portal, plyOrigin, plyAngle, width, height, fov)
     local falseworld = wp.falseworlds[fwname]
 
     if not falseworld then
-        print("Cant find false world!!")
+        ErrorNoHalt("Cant find false world!!")
         return
     end
 
