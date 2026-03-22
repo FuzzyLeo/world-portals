@@ -81,33 +81,30 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
 end)
 
 
-function wp.renderfalseworld(portal, plyOrigin, plyAngle, width, height, fov )
-    local texture = portal:GetTexture()
-    if wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
-        hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
-        render.PushRenderTarget( texture )
-        local oldW, oldH = ScrW(), ScrH()
-        local sizeX, sizeY = ScrW(), ScrH()
-        render.Clear( 0, 0, 0, 0, true, true )
-        render.SetViewPort( 0, 0, sizeX, sizeY )
+function wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, width, height, fov )
+    hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
+    render.PushRenderTarget( texture )
+    local oldW, oldH = ScrW(), ScrH()
+    local sizeX, sizeY = ScrW(), ScrH()
+    render.Clear( 0, 0, 0, 0, true, true )
+    render.SetViewPort( 0, 0, sizeX, sizeY )
 
-        local eyeOffset = plyOrigin
-        local oldFog = render.GetFogMode()
-        render.SuppressEngineLighting(true)
-        render.FogMode(MATERIAL_FOG_NONE)
+    local eyeOffset = plyOrigin
+    local oldFog = render.GetFogMode()
+    render.SuppressEngineLighting(true)
+    render.FogMode(MATERIAL_FOG_NONE)
 
-        PlyOriginLocal = plyOrigin - portal:GetPos()
+    PlyOriginLocal = plyOrigin - portal:GetPos()
 
-        wp.createfalseworld(portal, PlyOriginLocal, plyAngle, width, height, fov)
+    wp.createfalseworld(portal, PlyOriginLocal, plyAngle, width, height, fov)
 
-        render.OverrideDepthEnable(false)
-        render.FogMode(oldFog)
-        render.SuppressEngineLighting(false)
+    render.OverrideDepthEnable(false)
+    render.FogMode(oldFog)
+    render.SuppressEngineLighting(false)
 
-        render.SetViewPort( 0, 0, oldW, oldH )
-        render.PopRenderTarget()
-        hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
-    end
+    render.SetViewPort( 0, 0, oldW, oldH )
+    render.PopRenderTarget()
+    hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
 end
 
 function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
@@ -187,7 +184,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
             elseif falseWorld then
-                wp.renderfalseworld(portal, plyOrigin, plyAngle, width, height, fov )
+                wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, width, height, fov )
             end
         end
     end
