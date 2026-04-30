@@ -3,22 +3,22 @@
 wp = {}
 
 -- Load required files
-include( "worldportals/utils_sh.lua" )
-include( "worldportals/teleport_sh.lua" )
+include( "worldportals/sh_utils.lua" )
+include( "worldportals/sh_teleport.lua" )
 
 if SERVER then
 
-    include( "worldportals/render_sv.lua" )
-    include( "worldportals/teleport_sv.lua" )
+    include( "worldportals/sv_render.lua" )
+    include( "worldportals/sv_teleport.lua" )
 
-    AddCSLuaFile( "worldportals/utils_sh.lua" )
-    AddCSLuaFile( "worldportals/render_cl.lua" )
-    AddCSLuaFile( "worldportals/teleport_cl.lua" )
-    AddCSLuaFile( "worldportals/teleport_sh.lua" )
+    AddCSLuaFile( "worldportals/sh_utils.lua" )
+    AddCSLuaFile( "worldportals/cl_render.lua" )
+    AddCSLuaFile( "worldportals/cl_teleport.lua" )
+    AddCSLuaFile( "worldportals/sh_teleport.lua" )
 
 else
 
-    include( "worldportals/render_cl.lua" )
-    include( "worldportals/teleport_cl.lua" )
+    include( "worldportals/cl_render.lua" )
+    include( "worldportals/cl_teleport.lua" )
 
 end
