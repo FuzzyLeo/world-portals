@@ -6,6 +6,7 @@
     ":automergeMinor"
   ],
   "automergeType": "branch",
+  "forkProcessing": "enabled",
   "pinDigest": {
     "automerge": true
   }
