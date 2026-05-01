@@ -39,9 +39,15 @@ function ENT:KeyValue( key, value )
 
     elseif ( key == "EnableTeleport" ) then
         self:SetEnableTeleport( tobool(value) )
+        self.EnableTeleportSetByMap = true
 
     elseif ( key == "Open" ) then
         self:SetOpen( tobool(value) )
+        self.OpenSetByMap = true
+
+    elseif ( key == "startactive" or key == "StartActive" ) then
+        self:SetOpen( tobool(value) )
+        self.OpenSetByMap = true
 
     elseif ( string.Left( key, 2 ) == "On" ) then
         self:StoreOutput( key, value )
