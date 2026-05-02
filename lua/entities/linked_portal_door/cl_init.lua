@@ -3,14 +3,6 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
-CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals", 1, 100)
-
-local res = ((GetConVar("worldportals_resolution_percentage"):GetInt())/100)
-
-cvars.AddChangeCallback("worldportals_resolution_percentage", function(convar_name, value_old, value_new)
-    res = value_new/100
-end)
-
 function ENT:DrawPortal(exitPortal)
     if not (self:GetModel() == "models/error.mdl") then
         render.ModelMaterialOverride( wp.matInvis )
@@ -29,8 +21,10 @@ end
 
 -- Draw world portals
 function ENT:Draw()
-    if wp.drawing or not self:GetOpen() then return end
-    local shouldrender,drawblack=wp.shouldrender(self)
+    if not self:GetOpen() then return end
+    if wp.drawing and not wp.drawportalsinview then return end
+
+    local shouldrender,drawblack=wp.shouldrender(self, wp.vieworigin, wp.viewangle, wp.viewfov)
     if not (shouldrender or drawblack) then return end
 
     local exitPortal = self:GetExit()
@@ -38,9 +32,10 @@ function ENT:Draw()
     if not IsValid(exitPortal) and not falseWorld then return end
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
-    local width, height = ScrW()*res, ScrH()*res
-    local texture = GetRenderTarget("portal:" .. self:EntIndex() .. ":" .. width .. ":" .. height, width, height)
-    self:SetTexture( texture )
+    local texture, width, height, depth = wp.GetPortalDrawTexture(self)
+    if depth == 1 then
+        self:SetTexture( texture )
+    end
 
     if wp.rendermode then
         if shouldrender then

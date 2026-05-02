@@ -18,6 +18,80 @@ wp.portals = {}
 wp.drawing = true --default portals to not draw
 wp.rendermode = false
 
+CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals", 1, 100)
+CreateClientConVar("worldportals_recurse_depth", "1", true, false, "World Portals - Maximum portal recursion depth", 1, 9)
+
+local resolutionScale = 1
+local recurseDepth = 1
+
+local function ClampPortalResolution(value)
+    return math.Clamp((tonumber(value) or 100) / 100, 0.01, 1)
+end
+
+local function ClampRecurseDepth(value)
+    return math.Clamp(math.floor(tonumber(value) or 1), 1, 9)
+end
+
+local function UpdatePortalResolution()
+    resolutionScale = ClampPortalResolution(GetConVar("worldportals_resolution_percentage"):GetString())
+end
+
+local function UpdateRecurseDepth()
+    recurseDepth = ClampRecurseDepth(GetConVar("worldportals_recurse_depth"):GetString())
+end
+
+UpdatePortalResolution()
+UpdateRecurseDepth()
+
+cvars.AddChangeCallback("worldportals_resolution_percentage", function(convarName, oldValue, newValue)
+    resolutionScale = ClampPortalResolution(newValue)
+end)
+
+cvars.AddChangeCallback("worldportals_recurse_depth", function(convarName, oldValue, newValue)
+    recurseDepth = ClampRecurseDepth(newValue)
+end)
+
+function wp.GetRecurseDepth()
+    return recurseDepth
+end
+
+function wp.GetPortalRenderDepth()
+    return wp.renderdepth or wp.drawingdepth or 0
+end
+
+function wp.IsRenderingPortalView()
+    return wp.drawing or (wp.renderdepth or 0) > 1
+end
+
+function wp.GetPortalRenderSize(width, height)
+    width = width or ScrW()
+    height = height or ScrH()
+
+    return math.max(1, math.floor(width * resolutionScale)), math.max(1, math.floor(height * resolutionScale))
+end
+
+function wp.GetPortalTexture(portal, width, height, depth)
+    depth = ClampRecurseDepth(depth)
+    width, height = wp.GetPortalRenderSize(width, height)
+
+    portal.WPTextures = portal.WPTextures or {}
+
+    local textureKey = depth .. ":" .. width .. ":" .. height
+    local texture = portal.WPTextures[textureKey]
+    if texture then return texture, width, height end
+
+    texture = GetRenderTarget("portal:" .. portal:EntIndex() .. ":" .. width .. ":" .. height .. ":d" .. depth, width, height)
+    portal.WPTextures[textureKey] = texture
+
+    return texture, width, height
+end
+
+function wp.GetPortalDrawTexture(portal)
+    local depth = wp.drawtexturedepth or 1
+    local texture, width, height = wp.GetPortalTexture(portal, wp.viewwidth or ScrW(), wp.viewheight or ScrH(), depth)
+    return texture, width, height, depth
+end
+
 -- Start drawing the portals
 -- This prevents the game from crashing when loaded for the first time
 hook.Add( "PostRender", "WorldPortals_StartRender", function()
@@ -36,7 +110,7 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
 
     if not IsValid( exitPortal ) and not falseWorld then return false end
     
-    local override, drawblack = hook.Call( "wp-shouldrender", GAMEMODE, portal, exitPortal, camOrigin )
+    local override, drawblack = hook.Call( "wp-shouldrender", GAMEMODE, portal, exitPortal, camOrigin, camAngle, camFOV, wp.GetPortalRenderDepth() )
     if override ~= nil then return override, drawblack end
     
     if portal:IsDormant() then return false end
@@ -66,13 +140,37 @@ end
 
 local EMPTY={}
 function WorldPortals_RenderView(view)
+    local v=view or EMPTY
+    local origin = v.origin or EyePos()
+    local angles = v.angles or EyeAngles()
+    local width = v.width or v.w or ScrW()
+    local height = v.height or v.h or ScrH()
+    local fov = v.fov or LocalPlayer():GetFOV()
+
     if not wp.drawing then
-        local v=view or EMPTY
-        wp.renderportals(v.origin or EyePos(), v.angles or EyeAngles(), v.width or ScrW(), v.height or ScrH(), v.fov or LocalPlayer():GetFOV())
+        wp.renderportals(origin, angles, width, height, fov, 1)
     end
+
+    local oldRenderMode = wp.rendermode
+    local oldViewOrigin = wp.vieworigin
+    local oldViewAngle = wp.viewangle
+    local oldViewFOV = wp.viewfov
+    local oldViewWidth = wp.viewwidth
+    local oldViewHeight = wp.viewheight
+
     wp.rendermode = true
+    wp.vieworigin = origin
+    wp.viewangle = angles
+    wp.viewfov = fov
+    wp.viewwidth = width
+    wp.viewheight = height
     render.RealRenderView(view)
-    wp.rendermode = false
+    wp.rendermode = oldRenderMode
+    wp.vieworigin = oldViewOrigin
+    wp.viewangle = oldViewAngle
+    wp.viewfov = oldViewFOV
+    wp.viewwidth = oldViewWidth
+    wp.viewheight = oldViewHeight
 end
 
 render.RenderView = WorldPortals_RenderView
@@ -81,19 +179,39 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
 end)
 
 
-function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
+function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
     if ( wp.drawing ) then return end
-    wp.portals = ents.FindByClass( "linked_portal_door" )
-    if ( not wp.portals ) then return end
+
+    depth = ClampRecurseDepth(depth)
+    if depth > recurseDepth then return end
+
+    local oldRenderDepth = wp.renderdepth
+    wp.renderdepth = depth
+
+    if depth == 1 or not wp.portals then
+        wp.portals = ents.FindByClass( "linked_portal_door" )
+    end
+
+    local portals = wp.portals
+    if ( not portals ) then
+        wp.renderdepth = oldRenderDepth
+        return
+    end
+
+    local renderWidth, renderHeight = wp.GetPortalRenderSize(width, height)
 
     -- Disable phys gun glow and beam
     local oldWepColor = LocalPlayer():GetWeaponColor()
     LocalPlayer():SetWeaponColor( Vector( 0, 0, 0 ) )
 
-    for _, portal in pairs( wp.portals ) do
+    for _, portal in pairs( portals ) do
         local exitPortal = portal:GetExit()
         local falseWorld = portal:GetFalseWorld()
-        local texture = portal:GetTexture()
+        local texture = wp.GetPortalTexture(portal, width, height, depth)
+        if depth == 1 then
+            portal:SetTexture( texture )
+        end
+
         if wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
             if IsValid(exitPortal) then
                 hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
@@ -131,13 +249,28 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
                         zfar = nil
                     end
 
+                    local childDepth = depth + 1
+                    local drawPortalsInView = childDepth <= recurseDepth
+                    if drawPortalsInView then
+                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth)
+                    end
+
+                    local oldDrawing = wp.drawing
+                    local oldDrawingEnt = wp.drawingent
+                    local oldDrawingDepth = wp.drawingdepth
+                    local oldDrawTextureDepth = wp.drawtexturedepth
+                    local oldDrawPortalsInView = wp.drawportalsinview
+
                     wp.drawing = true
                     wp.drawingent = portal
+                    wp.drawingdepth = depth
+                    wp.drawtexturedepth = childDepth
+                    wp.drawportalsinview = drawPortalsInView
                         render.RenderView( {
                             x = 0,
                             y = 0,
-                            w = width,
-                            h = height,
+                            w = renderWidth,
+                            h = renderHeight,
                             fov = fov,
                             origin = camOrigin,
                             angles = camAngle,
@@ -149,8 +282,11 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
                             viewid = 1, -- VIEW_3DSKY
                             zfar = zfar
                         } )
-                    wp.drawing = false
-                    wp.drawingent = nil
+                    wp.drawing = oldDrawing
+                    wp.drawingent = oldDrawingEnt
+                    wp.drawingdepth = oldDrawingDepth
+                    wp.drawtexturedepth = oldDrawTextureDepth
+                    wp.drawportalsinview = oldDrawPortalsInView
 
                     render.PopCustomClipPlane()
                     render.EnableClipping( oldClip )
@@ -158,11 +294,12 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov )
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
             elseif falseWorld then
-                wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, width, height, fov )
+                wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, renderWidth, renderHeight, fov )
             end
         end
     end
     LocalPlayer():SetWeaponColor( oldWepColor )
+    wp.renderdepth = oldRenderDepth
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
