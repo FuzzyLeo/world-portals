@@ -3,19 +3,27 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
-function ENT:DrawPortal(exitPortal)
+-- color: vertex tint for box/quad geometry (defaults to opaque black for
+-- silhouette/stencil writes; pass color_white in the matView2 path so the
+-- bound texture shows through unmodulated).
+-- solid: when true, inverted thick portals render as a full 6-face box rather
+-- than the 5-inner-quads variant. The 5-quads variant exists so the stencil
+-- path can mask against an open front; outside that path (matView2) the open
+-- front just leaks underlying world geometry, so callers should pass solid=true.
+function ENT:DrawPortal(exitPortal, color, solid)
+    color = color or color_black
     if not (self:GetModel() == "models/error.mdl") then
         render.ModelMaterialOverride( wp.matInvis )
         render.Model({model = self:GetModel(), pos = self:LocalToWorld(self:GetModelPos()), angle = self:LocalToWorldAngles(self:GetModelAng())})
         render.ModelMaterialOverride( nil )
     elseif self:GetThickness() == 0 or hook.Call("wp-allowthickportal", GAMEMODE, self, exitPortal)==false then
-        render.DrawQuadEasy( self:GetPos() -( self:GetForward() * 5 ), self:GetForward(), self:GetWidth(), self:GetHeight(), color_black, self:GetAngles().roll )
-    elseif self:GetInverted() then
+        render.DrawQuadEasy( self:GetPos() -( self:GetForward() * 5 ), self:GetForward(), self:GetWidth(), self:GetHeight(), color, self:GetAngles().roll )
+    elseif self:GetInverted() and not solid then
         for _,quad in ipairs(self.RenderQuads) do
-            render.DrawQuad(self:LocalToWorld(quad[1]), self:LocalToWorld(quad[2]), self:LocalToWorld(quad[3]), self:LocalToWorld(quad[4]), color_black)
+            render.DrawQuad(self:LocalToWorld(quad[1]), self:LocalToWorld(quad[2]), self:LocalToWorld(quad[3]), self:LocalToWorld(quad[4]), color)
         end
     else
-        render.DrawBox(self:GetPos(), self:GetAngles(), self.RenderMin, self.RenderMax, color_black)
+        render.DrawBox(self:GetPos(), self:GetAngles(), self.RenderMin, self.RenderMax, color)
     end
 end
 
@@ -44,7 +52,10 @@ function ENT:Draw()
         else
             render.SetMaterial( wp.matBlack )
         end
-        self:DrawPortal(exitPortal)
+        -- solid=true: close the inverted-thick front so world geometry inside
+        -- the box (e.g. police-box carpet) doesn't leak through.
+        -- color=white when shouldrender so matView2's texture is visible.
+        self:DrawPortal(exitPortal, shouldrender and color_white or color_black, true)
     else
         if shouldrender then
             render.ClearStencil()
