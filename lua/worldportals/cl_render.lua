@@ -234,8 +234,6 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
 
                     local exit_pos = exitPortal:GetPos() + offset
 
-                    render.PushCustomClipPlane( exit_forward, exit_forward:Dot( exit_pos - exit_forward * 0.5 ) )
-
                     local camOrigin = wp.TransformPortalPos( plyOrigin, portal, exitPortal )
                     local camAngle = wp.TransformPortalAngle( plyAngle, portal, exitPortal )
 
@@ -266,6 +264,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
                     wp.drawingdepth = depth
                     wp.drawtexturedepth = childDepth
                     wp.drawportalsinview = drawPortalsInView
+                    render.PushCustomClipPlane( exit_forward, exit_forward:Dot( exit_pos - exit_forward * 0.5 ) )
                         render.RenderView( {
                             x = 0,
                             y = 0,
@@ -306,13 +305,11 @@ hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, f
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 
---[[ causes player to see themselves in first person sometimes (particularly in multiplayer)
 hook.Add( "ShouldDrawLocalPlayer", "WorldPortals_Render", function()
     if wp.drawing then
         return true
     end
 end )
-]]--
 
 hook.Add( "PreDrawHalos", "WorldPortals_Render", function()
     if wp.drawing then return false end
