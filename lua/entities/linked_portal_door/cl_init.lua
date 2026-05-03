@@ -37,7 +37,7 @@ function ENT:Draw()
 
     local exitPortal = self:GetExit()
     local falseWorld = self:GetFalseWorld()
-    if not IsValid(exitPortal) and not falseWorld then return end
+    if not IsValid(exitPortal) and not (falseWorld and falseWorld ~= "") then return end
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
     local texture, width, height, depth = wp.GetPortalDrawTexture(self)

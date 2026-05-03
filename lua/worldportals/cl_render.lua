@@ -108,7 +108,7 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     local distance = camOrigin:Distance( portal:GetPos() )
     local disappearDist = portal:GetDisappearDist()
 
-    if not IsValid( exitPortal ) and not falseWorld then return false end
+    if not IsValid( exitPortal ) and not (falseWorld and falseWorld ~= "") then return false end
     
     local override, drawblack = hook.Call( "wp-shouldrender", GAMEMODE, portal, exitPortal, camOrigin, camAngle, camFOV, wp.GetPortalRenderDepth() )
     if override ~= nil then return override, drawblack end
@@ -379,7 +379,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, playe
                 render.PopRenderTarget()
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
-            elseif falseWorld then
+            elseif falseWorld and falseWorld ~= "" then
                 wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, renderWidth, renderHeight, fov )
             end
         end
