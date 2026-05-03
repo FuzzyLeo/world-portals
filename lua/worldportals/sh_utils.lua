@@ -48,12 +48,25 @@ function wp.IsLookingAt( portal, portal_pos, view_pos, view_ang, view_fov )
         local dir = disp:GetNormalized()
         local viewRadius = arctan2(radius/math.sqrt(distSqr), math.sqrt(1 - radius^2/distSqr)) * 180 / math.pi
         local viewOffset = arctan2(crossDist(dir, aimVec), dir:Dot(aimVec)) * 180 / math.pi
-        
+
         if (viewOffset <= ((view_fov*1.5) / 2 + viewRadius)) then
             return true
         end
     else
-        return true
+        -- Inside the bounding sphere: the cone test math breaks down, so we
+        -- fall back to "render anyway" for the close-range peripheral case.
+        -- But cull if the entire portal sits behind the view direction —
+        -- bounding sphere overstates extent badly for thin portals (a portal
+        -- you've already walked past would otherwise keep rendering its full
+        -- recursion subtree). Use the portal's actual oriented extent along
+        -- the view direction instead of the sphere radius.
+        local aimVec = view_ang:Forward()
+        local extent = (math.abs(portal:GetWidth()     * portal:GetRight():Dot(aimVec))
+                      + math.abs(portal:GetHeight()    * portal:GetUp():Dot(aimVec))
+                      + math.abs(portal:GetThickness() * portal:GetForward():Dot(aimVec))) / 2
+        if disp:Dot(aimVec) + extent > 0 then
+            return true
+        end
     end
 end
 
