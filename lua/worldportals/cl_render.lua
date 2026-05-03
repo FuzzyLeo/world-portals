@@ -179,11 +179,81 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
 end)
 
 
-function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
+-- Project a portal's visible-face quad to NDC of an arbitrary camera. Returns
+-- the screen-space AABB (clamped to the camera's [-1,1] frustum) or nil if the
+-- portal sits entirely behind the camera or off-frustum.
+local function projectPortalToCameraNDC(portal, camPos, camAng, camFov, aspect)
+    local pos = portal:GetPos()
+    local fwd = portal:GetForward()
+    local right = portal:GetRight()
+    local up = portal:GetUp()
+    local hw = portal:GetWidth() * 0.5
+    local hh = portal:GetHeight() * 0.5
+    -- portal's visible face sits at pos - fwd*5 (matches DrawQuadEasy in cl_init.lua)
+    local center = pos - fwd * 5
+    local corners = {
+        center + right * hw + up * hh,
+        center - right * hw + up * hh,
+        center - right * hw - up * hh,
+        center + right * hw - up * hh,
+    }
+
+    local f = camAng:Forward()
+    local r = camAng:Right()
+    local u = camAng:Up()
+
+    local tanHalfH = math.tan(camFov * math.pi / 360)
+    local tanHalfV = tanHalfH / aspect
+
+    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+    local anyForward = false
+    for _, c in ipairs(corners) do
+        local rel = c - camPos
+        local d = rel:Dot(f)
+        if d > 0.1 then
+            anyForward = true
+            local x = rel:Dot(r) / (d * tanHalfH)
+            local y = rel:Dot(u) / (d * tanHalfV)
+            if x < minX then minX = x end
+            if x > maxX then maxX = x end
+            if y < minY then minY = y end
+            if y > maxY then maxY = y end
+        end
+    end
+    if not anyForward then return nil end
+
+    -- clamp to inner-camera visible NDC
+    if minX < -1 then minX = -1 end
+    if minY < -1 then minY = -1 end
+    if maxX >  1 then maxX =  1 end
+    if maxY >  1 then maxY =  1 end
+    if minX >= maxX or minY >= maxY then return nil end
+
+    return minX, minY, maxX, maxY
+end
+
+-- Map an inner-camera NDC AABB through an outer player-screen AABB. With the
+-- outer rect set to full NDC this is the identity transformation, so the same
+-- code works at every depth.
+local function mapInnerThroughOuter(iMinX, iMinY, iMaxX, iMaxY, oMinX, oMinY, oMaxX, oMaxY)
+    local sx = (oMaxX - oMinX) * 0.5
+    local sy = (oMaxY - oMinY) * 0.5
+    return oMinX + (iMinX + 1) * sx,
+           oMinY + (iMinY + 1) * sy,
+           oMinX + (iMaxX + 1) * sx,
+           oMinY + (iMaxY + 1) * sy
+end
+
+function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY )
     if ( wp.drawing ) then return end
 
     depth = ClampRecurseDepth(depth)
     if depth > recurseDepth then return end
+
+    -- top-level callers pass nil; default to the player's full screen
+    if not playerScreenMinX then
+        playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY = -1, -1, 1, 1
+    end
 
     local oldRenderDepth = wp.renderdepth
     wp.renderdepth = depth
@@ -199,6 +269,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
     end
 
     local renderWidth, renderHeight = wp.GetPortalRenderSize(width, height)
+    local aspect = width / height
 
     -- Disable phys gun glow and beam
     local oldWepColor = LocalPlayer():GetWeaponColor()
@@ -212,7 +283,20 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
             portal:SetTexture( texture )
         end
 
+        local portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY
         if wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
+            -- Layer 2 culling: project this portal onto the inner-camera frustum,
+            -- then map through the chain of outer screen rects to see how much of
+            -- the player's actual screen this portal would occupy. Cull if none.
+            local iMinX, iMinY, iMaxX, iMaxY = projectPortalToCameraNDC(portal, plyOrigin, plyAngle, fov, aspect)
+            if iMinX then
+                portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY =
+                    mapInnerThroughOuter(iMinX, iMinY, iMaxX, iMaxY,
+                        playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY)
+            end
+        end
+
+        if portalScreenMinX and texture then
             if IsValid(exitPortal) then
                 hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
                 render.PushRenderTarget( texture )
@@ -250,7 +334,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth )
                     local childDepth = depth + 1
                     local drawPortalsInView = childDepth <= recurseDepth
                     if drawPortalsInView then
-                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth)
+                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth,
+                            portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY)
                     end
 
                     local oldDrawing = wp.drawing
