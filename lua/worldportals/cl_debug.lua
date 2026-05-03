@@ -1,5 +1,5 @@
 
-CreateClientConVar("worldportals_debug", "0", true, false, "World Portals - Show portal render-decision debug overlay", 0, 1)
+CreateClientConVar("worldportals_debug", "0", true, false, "World Portals - Debug overlay (0=off, 1=rendered only, 2=rendered + culled)", 0, 2)
 
 local COLOR_RENDERED = Color(0, 255, 0, 220)
 local COLOR_CULLED = Color(255, 60, 60, 220)
@@ -30,13 +30,14 @@ end
 -- yellow otherwise. We descend into a portal's exit only when it
 -- would actually render, since that mirrors what the renderer does.
 local function drawPortalOverlay(plyOrigin, plyAngles, plyFov, aspect, portals,
-                                 parentPoly, depth, maxDepth)
+                                 parentPoly, depth, maxDepth, showCulled)
     if depth > maxDepth then return end
 
     for _, portal in pairs(portals) do
         if IsValid(portal) then
             local rendered = wp.shouldrender(portal, plyOrigin, plyAngles, plyFov)
-            -- Top-level draws even when culled (red); deeper levels skip culled.
+            -- Top-level always considers culled portals (red); deeper levels
+            -- skip portals the current camera doesn't see (inner-cam cull).
             if depth == 1 or rendered then
                 local pts = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngles, plyFov, aspect)
 
@@ -49,8 +50,10 @@ local function drawPortalOverlay(plyOrigin, plyAngles, plyFov, aspect, portals,
                     color = visible and COLOR_CHILD_VISIBLE or COLOR_CHILD
                 end
 
-                surface.SetDrawColor(color)
-                drawScreenPolygon(pts)
+                if visible or showCulled then
+                    surface.SetDrawColor(color)
+                    drawScreenPolygon(pts)
+                end
 
                 if visible and depth + 1 <= maxDepth then
                     local exit = portal:GetExit()
@@ -65,7 +68,7 @@ local function drawPortalOverlay(plyOrigin, plyAngles, plyFov, aspect, portals,
                             childParent = wp.IntersectConvexPolygons(pts, parentPoly)
                         end
                         drawPortalOverlay(innerOrigin, innerAngles, plyFov, aspect, portals,
-                            childParent, depth + 1, maxDepth)
+                            childParent, depth + 1, maxDepth, showCulled)
                     end
                 end
             end
@@ -74,7 +77,8 @@ local function drawPortalOverlay(plyOrigin, plyAngles, plyFov, aspect, portals,
 end
 
 hook.Add("HUDPaint", "WorldPortals_Debug", function()
-    if not GetConVar("worldportals_debug"):GetBool() then return end
+    local mode = GetConVar("worldportals_debug"):GetInt()
+    if mode <= 0 then return end
 
     local camPos = EyePos()
     local camAng = EyeAngles()
@@ -83,7 +87,7 @@ hook.Add("HUDPaint", "WorldPortals_Debug", function()
     local portals = ents.FindByClass("linked_portal_door")
     local maxDepth = wp.GetRecurseDepth()
 
-    drawPortalOverlay(camPos, camAng, camFov, aspect, portals, nil, 1, maxDepth)
+    drawPortalOverlay(camPos, camAng, camFov, aspect, portals, nil, 1, maxDepth, mode >= 2)
 
     local SHADOW = Color(0, 0, 0, 220)
     local x = 16
