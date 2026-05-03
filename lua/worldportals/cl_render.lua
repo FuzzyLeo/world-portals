@@ -120,9 +120,15 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     if not (disappearDist <= 0) and distance > disappearDist then return false end
     
     --don't render if the view is behind the portal
+    -- Use the thick-portal back-face plane only at the top level (player view)
+    -- so a player walking through a thick portal still sees its render during
+    -- the brief client-side window before the teleport net message arrives.
+    -- At depth>1 the inner camera lands inside the exit portal's thick volume
+    -- by construction (paired-portal mirror), and rendering it would create
+    -- an infinite recursion bouncing between the pair.
     local portalPos
     local thickness = portal:GetThickness()
-    if thickness > 0 then
+    if thickness > 0 and wp.GetPortalRenderDepth() <= 1 then
         portalPos = portal:LocalToWorld(Vector(-thickness,0,0))
     else
         portalPos = portal:GetPos()
