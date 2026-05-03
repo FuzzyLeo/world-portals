@@ -48,40 +48,104 @@ end
 local COLOR_RENDERED = Color(0, 255, 0, 220)
 local COLOR_CULLED = Color(255, 60, 60, 220)
 local COLOR_CHILD = Color(255, 220, 0, 220)
+local COLOR_CHILD_VISIBLE = Color(255, 140, 0, 220)
 
--- Draw the clipped portal quad on the player screen using a custom camera's
--- NDC. The inner camera renders to a screen-aligned RT, so a feature at
--- inner-NDC (u, v) appears at player-screen NDC (u, v) within the parent's
--- stencil region.
-local function drawClippedQuadNDC(child, camPos, camFwd, camRight, camUp, tanHalfH, tanHalfV)
-    local c1, c2, c3, c4 = getPortalCorners(child)
+-- Project a portal's clipped quad to player screen pixels using the
+-- player's camera (via :ToScreen()).
+local function projectQuadScreen(portal, camPos, camFwd)
+    local c1, c2, c3, c4 = getPortalCorners(portal)
     local pts = clipQuadToCamera(c1, c2, c3, c4, camPos, camFwd)
-    if #pts < 2 then return end
+    local out = {}
+    for _, v in ipairs(pts) do
+        local s = v:ToScreen()
+        out[#out + 1] = { x = s.x, y = s.y }
+    end
+    return out
+end
 
+-- Project a portal's clipped quad to player screen pixels through a custom
+-- (inner) camera. The inner camera renders to a screen-aligned RT, so a
+-- feature at inner-NDC (u, v) lands at player-screen NDC (u, v).
+local function projectQuadScreenNDC(portal, camPos, camFwd, camRight, camUp, tanHalfH, tanHalfV)
+    local c1, c2, c3, c4 = getPortalCorners(portal)
+    local pts = clipQuadToCamera(c1, c2, c3, c4, camPos, camFwd)
+    local out = {}
     local sw, sh = ScrW(), ScrH()
-    local first, prev
     for _, v in ipairs(pts) do
         local rel = v - camPos
         local d = rel:Dot(camFwd)
         local ndcX = rel:Dot(camRight) / (d * tanHalfH)
         local ndcY = rel:Dot(camUp)    / (d * tanHalfV)
-        local s = {
+        out[#out + 1] = {
             x = (ndcX + 1) * 0.5 * sw,
             y = (1 - ndcY) * 0.5 * sh,
         }
+    end
+    return out
+end
+
+local function projectPolyOntoAxis(pts, ax, ay)
+    local mn, mx = math.huge, -math.huge
+    for _, p in ipairs(pts) do
+        local d = p.x * ax + p.y * ay
+        if d < mn then mn = d end
+        if d > mx then mx = d end
+    end
+    return mn, mx
+end
+
+-- Test each edge of polygon `axes` as a candidate separating axis: project
+-- both polygons onto the edge's normal and report disjoint ranges.
+local function hasSeparatingEdge(axes, other)
+    local function testEdge(p1, p2)
+        local ax = -(p2.y - p1.y)
+        local ay = p2.x - p1.x
+        local aMin, aMax = projectPolyOntoAxis(axes, ax, ay)
+        local bMin, bMax = projectPolyOntoAxis(other, ax, ay)
+        return aMax < bMin or bMax < aMin
+    end
+
+    local first, prev
+    for _, p in ipairs(axes) do
         if prev then
-            surface.DrawLine(prev.x, prev.y, s.x, s.y)
+            if testEdge(prev, p) then return true end
         else
-            first = s
+            first = p
         end
-        prev = s
+        prev = p
+    end
+    if first and prev and prev ~= first then
+        if testEdge(prev, first) then return true end
+    end
+    return false
+end
+
+-- Convex-polygon intersection via Separating Axis Theorem. Both inputs are
+-- assumed convex (which our near-plane-clipped quads always are).
+local function polygonsIntersect(a, b)
+    if #a < 3 or #b < 3 then return false end
+    if hasSeparatingEdge(a, b) then return false end
+    if hasSeparatingEdge(b, a) then return false end
+    return true
+end
+
+local function drawScreenPolygon(pts)
+    if #pts < 2 then return end
+    local first, prev
+    for _, p in ipairs(pts) do
+        if prev then
+            surface.DrawLine(prev.x, prev.y, p.x, p.y)
+        else
+            first = p
+        end
+        prev = p
     end
     if first and prev and prev ~= first then
         surface.DrawLine(prev.x, prev.y, first.x, first.y)
     end
 end
 
-local function drawChildOverlays(parent, plyOrigin, plyAngles, plyFov, aspect, portals)
+local function drawChildOverlays(parent, plyOrigin, plyAngles, plyFov, aspect, portals, parentPts)
     local exit = parent:GetExit()
     if not IsValid(exit) then return end
 
@@ -96,32 +160,14 @@ local function drawChildOverlays(parent, plyOrigin, plyAngles, plyFov, aspect, p
     local tanHalfV = math.tan(plyFov * math.pi / 360) * 0.75
     local tanHalfH = tanHalfV * aspect
 
-    surface.SetDrawColor(COLOR_CHILD)
     for _, child in pairs(portals) do
         if IsValid(child)
            and wp.shouldrender(child, innerOrigin, innerAngles, plyFov) then
-            drawClippedQuadNDC(child, innerOrigin, innerFwd, innerRight, innerUp, tanHalfH, tanHalfV)
+            local pts = projectQuadScreenNDC(child, innerOrigin, innerFwd, innerRight, innerUp, tanHalfH, tanHalfV)
+            local color = polygonsIntersect(parentPts, pts) and COLOR_CHILD_VISIBLE or COLOR_CHILD
+            surface.SetDrawColor(color)
+            drawScreenPolygon(pts)
         end
-    end
-end
-
-local function drawClippedQuad(portal, camPos, camFwd)
-    local c1, c2, c3, c4 = getPortalCorners(portal)
-    local pts = clipQuadToCamera(c1, c2, c3, c4, camPos, camFwd)
-    if #pts < 2 then return end
-
-    local first, prev
-    for _, v in ipairs(pts) do
-        local s = v:ToScreen()
-        if prev then
-            surface.DrawLine(prev.x, prev.y, s.x, s.y)
-        else
-            first = s
-        end
-        prev = s
-    end
-    if first and prev and prev ~= first then
-        surface.DrawLine(prev.x, prev.y, first.x, first.y)
     end
 end
 
@@ -138,11 +184,12 @@ hook.Add("HUDPaint", "WorldPortals_Debug", function()
     for _, portal in ipairs(portals) do
         if IsValid(portal) then
             local rendered = wp.shouldrender(portal)
+            local pts = projectQuadScreen(portal, camPos, camFwd)
             surface.SetDrawColor(rendered and COLOR_RENDERED or COLOR_CULLED)
-            drawClippedQuad(portal, camPos, camFwd)
+            drawScreenPolygon(pts)
 
             if rendered then
-                drawChildOverlays(portal, camPos, camAng, camFov, aspect, portals)
+                drawChildOverlays(portal, camPos, camAng, camFov, aspect, portals, pts)
             end
         end
     end
