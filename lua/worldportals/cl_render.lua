@@ -181,81 +181,149 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
 end)
 
 
--- Project a portal's visible-face quad to NDC of an arbitrary camera. Returns
--- the screen-space AABB (clamped to the camera's [-1,1] frustum) or nil if the
--- portal sits entirely behind the camera or off-frustum.
-local function projectPortalToCameraNDC(portal, camPos, camAng, camFov, aspect)
+local function getPortalCorners(portal)
     local pos = portal:GetPos()
     local fwd = portal:GetForward()
     local right = portal:GetRight()
     local up = portal:GetUp()
     local hw = portal:GetWidth() * 0.5
     local hh = portal:GetHeight() * 0.5
-    -- portal's visible face sits at pos - fwd*5 (matches DrawQuadEasy in cl_init.lua)
+    -- visible face sits at pos - fwd*5 (matches DrawQuadEasy in entity cl_init.lua)
     local center = pos - fwd * 5
-    local corners = {
+    return
         center + right * hw + up * hh,
         center - right * hw + up * hh,
         center - right * hw - up * hh,
-        center + right * hw - up * hh,
-    }
+        center + right * hw - up * hh
+end
 
-    local f = camAng:Forward()
-    local r = camAng:Right()
-    local u = camAng:Up()
+local NEAR_EPS = 1
 
-    local tanHalfH = math.tan(camFov * math.pi / 360)
-    local tanHalfV = tanHalfH / aspect
-
-    local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
-    local anyForward = false
-    for _, c in ipairs(corners) do
-        local rel = c - camPos
-        local d = rel:Dot(f)
-        if d > 0.1 then
-            anyForward = true
-            local x = rel:Dot(r) / (d * tanHalfH)
-            local y = rel:Dot(u) / (d * tanHalfV)
-            if x < minX then minX = x end
-            if x > maxX then maxX = x end
-            if y < minY then minY = y end
-            if y > maxY then maxY = y end
+-- Sutherland-Hodgman clip of a world-space quad against the half-space in
+-- front of the camera (signed distance along camFwd > NEAR_EPS). Returns
+-- 0..5 world-space points.
+local function clipQuadNearPlane(c1, c2, c3, c4, camPos, camFwd)
+    local pts = {}
+    local function clipEdge(a, b)
+        local da = (a - camPos):Dot(camFwd) - NEAR_EPS
+        local db = (b - camPos):Dot(camFwd) - NEAR_EPS
+        if da > 0 then
+            pts[#pts + 1] = a
+            if db <= 0 then
+                pts[#pts + 1] = a + (b - a) * (da / (da - db))
+            end
+        elseif db > 0 then
+            pts[#pts + 1] = a + (b - a) * (da / (da - db))
         end
     end
-    if not anyForward then return nil end
-
-    -- clamp to inner-camera visible NDC
-    if minX < -1 then minX = -1 end
-    if minY < -1 then minY = -1 end
-    if maxX >  1 then maxX =  1 end
-    if maxY >  1 then maxY =  1 end
-    if minX >= maxX or minY >= maxY then return nil end
-
-    return minX, minY, maxX, maxY
+    clipEdge(c1, c2)
+    clipEdge(c2, c3)
+    clipEdge(c3, c4)
+    clipEdge(c4, c1)
+    return pts
 end
 
--- Map an inner-camera NDC AABB through an outer player-screen AABB. With the
--- outer rect set to full NDC this is the identity transformation, so the same
--- code works at every depth.
-local function mapInnerThroughOuter(iMinX, iMinY, iMaxX, iMaxY, oMinX, oMinY, oMaxX, oMaxY)
-    local sx = (oMaxX - oMinX) * 0.5
-    local sy = (oMaxY - oMinY) * 0.5
-    return oMinX + (iMinX + 1) * sx,
-           oMinY + (iMinY + 1) * sy,
-           oMinX + (iMaxX + 1) * sx,
-           oMinY + (iMaxY + 1) * sy
+-- Project a portal's visible-face quad through an arbitrary camera into
+-- player-screen pixel space, applying near-plane clipping and Hor+ FOV
+-- scaling. Inner cameras render to screen-aligned RTs sampled at screen
+-- UV, so a feature at inner-NDC (u, v) lands at player-screen NDC (u, v)
+-- — the same conversion works at top level (player camera) and at every
+-- recursion depth. Returns a list of 0..5 {x, y} screen-pixel points.
+function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
+    local fwd = camAng:Forward()
+    local right = camAng:Right()
+    local up = camAng:Up()
+    -- Hor+ scaling: GetFOV() is the horizontal FOV at 4:3 reference; the
+    -- engine derives vfov from that and widens hfov for wider aspects.
+    local tanHalfV = math.tan(camFov * math.pi / 360) * 0.75
+    local tanHalfH = tanHalfV * aspect
+
+    local c1, c2, c3, c4 = getPortalCorners(portal)
+    local clipped = clipQuadNearPlane(c1, c2, c3, c4, camPos, fwd)
+
+    local sw, sh = ScrW(), ScrH()
+    local out = {}
+    for _, v in ipairs(clipped) do
+        local rel = v - camPos
+        local d = rel:Dot(fwd)
+        local ndcX = rel:Dot(right) / (d * tanHalfH)
+        local ndcY = rel:Dot(up)    / (d * tanHalfV)
+        out[#out + 1] = {
+            x = (ndcX + 1) * 0.5 * sw,
+            y = (1 - ndcY) * 0.5 * sh,
+        }
+    end
+    return out
 end
 
-function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY )
+local function projectPolyOntoAxis(pts, ax, ay)
+    local mn, mx = math.huge, -math.huge
+    for _, p in ipairs(pts) do
+        local d = p.x * ax + p.y * ay
+        if d < mn then mn = d end
+        if d > mx then mx = d end
+    end
+    return mn, mx
+end
+
+-- Test each edge of polygon `axes` as a candidate separating axis: project
+-- both polygons onto the edge's normal and report disjoint ranges.
+local function hasSeparatingEdge(axes, other)
+    local function testEdge(p1, p2)
+        local ax = -(p2.y - p1.y)
+        local ay = p2.x - p1.x
+        local aMin, aMax = projectPolyOntoAxis(axes, ax, ay)
+        local bMin, bMax = projectPolyOntoAxis(other, ax, ay)
+        return aMax < bMin or bMax < aMin
+    end
+
+    local first, prev
+    for _, p in ipairs(axes) do
+        if prev then
+            if testEdge(prev, p) then return true end
+        else
+            first = p
+        end
+        prev = p
+    end
+    if first and prev and prev ~= first then
+        if testEdge(prev, first) then return true end
+    end
+    return false
+end
+
+-- Convex-polygon intersection via Separating Axis Theorem. Both inputs are
+-- assumed convex (which our near-plane-clipped quads always are).
+function wp.PolygonsIntersectSAT(a, b)
+    if #a < 3 or #b < 3 then return false end
+    if hasSeparatingEdge(a, b) then return false end
+    if hasSeparatingEdge(b, a) then return false end
+    return true
+end
+
+local framePortalRenderCount = 0
+local framePortalRenderByDepth = {}
+
+function wp.GetFramePortalRenderCount()
+    return framePortalRenderCount
+end
+
+function wp.GetFramePortalRenderByDepth()
+    return framePortalRenderByDepth
+end
+
+hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
+    framePortalRenderCount = 0
+    for d in pairs(framePortalRenderByDepth) do
+        framePortalRenderByDepth[d] = 0
+    end
+end)
+
+function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly )
     if ( wp.drawing ) then return end
 
     depth = ClampRecurseDepth(depth)
     if depth > recurseDepth then return end
-
-    -- top-level callers pass nil; default to the player's full screen
-    if not playerScreenMinX then
-        playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY = -1, -1, 1, 1
-    end
 
     local oldRenderDepth = wp.renderdepth
     wp.renderdepth = depth
@@ -285,20 +353,22 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, playe
             portal:SetTexture( texture )
         end
 
-        local portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY
+        local poly
         if wp.shouldrender(portal, plyOrigin, plyAngle, fov) and texture then
-            -- Layer 2 culling: project this portal onto the inner-camera frustum,
-            -- then map through the chain of outer screen rects to see how much of
-            -- the player's actual screen this portal would occupy. Cull if none.
-            local iMinX, iMinY, iMaxX, iMaxY = projectPortalToCameraNDC(portal, plyOrigin, plyAngle, fov, aspect)
-            if iMinX then
-                portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY =
-                    mapInnerThroughOuter(iMinX, iMinY, iMaxX, iMaxY,
-                        playerScreenMinX, playerScreenMinY, playerScreenMaxX, playerScreenMaxY)
+            poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
+            -- Stencil cull: at depth > 1 the portal must intersect its
+            -- immediate parent's screen polygon, otherwise the parent's
+            -- stencil masks it out entirely.
+            if depth > 1 and parentPoly and not wp.PolygonsIntersectSAT(parentPoly, poly) then
+                poly = nil
+            elseif #poly < 3 then
+                poly = nil
             end
         end
 
-        if portalScreenMinX and texture then
+        if poly and texture then
+            framePortalRenderCount = framePortalRenderCount + 1
+            framePortalRenderByDepth[depth] = (framePortalRenderByDepth[depth] or 0) + 1
             if IsValid(exitPortal) then
                 hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
                 render.PushRenderTarget( texture )
@@ -336,8 +406,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, playe
                     local childDepth = depth + 1
                     local drawPortalsInView = childDepth <= recurseDepth
                     if drawPortalsInView then
-                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth,
-                            portalScreenMinX, portalScreenMinY, portalScreenMaxX, portalScreenMaxY)
+                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, poly)
                     end
 
                     local oldDrawing = wp.drawing
