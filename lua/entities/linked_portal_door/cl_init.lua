@@ -38,6 +38,12 @@ function ENT:Draw()
     local exitPortal = self:GetExit()
     local falseWorld = self:GetFalseWorld()
     if not IsValid(exitPortal) and not (falseWorld and falseWorld ~= "") then return end
+
+    -- If our chain wasn't rendered this frame (parent area-cull, etc.) the RT
+    -- holds stale or undefined content. Bail out so the world geometry behind
+    -- the portal shows through, rather than smearing last frame's contents.
+    if shouldrender and not wp.IsPortalChainRendered(self) then return end
+
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
     local texture, width, height, depth = wp.GetPortalDrawTexture(self)
