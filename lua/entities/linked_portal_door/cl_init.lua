@@ -29,6 +29,7 @@ end
 
 -- Draw world portals
 function ENT:Draw()
+    if not (wp.IsEnabled and wp.IsEnabled()) then return end
     if not self:GetOpen() then return end
     if wp.drawing and not wp.drawportalsinview then return end
 

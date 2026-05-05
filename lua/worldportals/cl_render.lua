@@ -18,8 +18,6 @@ wp.portals = {}
 wp.drawing = true --default portals to not draw
 wp.rendermode = false
 
-local POLY_SKIP_SENTINEL = {}
-
 -- Reused across all portal RT renders this frame to avoid allocating a fresh
 -- view struct per render.RenderView call (33+ calls/frame in dual-pair test
 -- maps was producing major GC pauses).
@@ -40,56 +38,35 @@ wp._renderView = {
     zfar = nil,
 }
 
-CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals", 1, 100)
+CreateClientConVar("worldportals_enabled", "1", true, false, "Enable World Portals rendering. When 0, portals don't render and entity Draw bails — frees the per-frame engine RenderView allocations the recursion produces.", 0, 1)
 CreateClientConVar("worldportals_recurse_depth", "1", true, false, "World Portals - Maximum portal recursion depth", 1, 9)
-CreateClientConVar("worldportals_min_render_area", "100", true, false, "World Portals - Minimum cumulative on-screen pixel area for a recursed portal to render. Higher = more aggressive culling of deep / tiny portals.", 0, 100000)
 
-local resolutionScale = 1
+local enabled = true
 local recurseDepth = 1
-local minRenderArea = 100
-
-local function ClampPortalResolution(value)
-    return math.Clamp((tonumber(value) or 100) / 100, 0.01, 1)
-end
 
 local function ClampRecurseDepth(value)
     return math.Clamp(math.floor(tonumber(value) or 1), 1, 9)
 end
 
-local function ClampMinRenderArea(value)
-    return math.max(0, tonumber(value) or 0)
-end
-
-local function UpdatePortalResolution()
-    resolutionScale = ClampPortalResolution(GetConVar("worldportals_resolution_percentage"):GetString())
+local function UpdateEnabled()
+    enabled = GetConVar("worldportals_enabled"):GetInt() ~= 0
 end
 
 local function UpdateRecurseDepth()
     recurseDepth = ClampRecurseDepth(GetConVar("worldportals_recurse_depth"):GetString())
 end
 
-local function UpdateMinRenderArea()
-    minRenderArea = ClampMinRenderArea(GetConVar("worldportals_min_render_area"):GetString())
-end
-
-UpdatePortalResolution()
+UpdateEnabled()
 UpdateRecurseDepth()
-UpdateMinRenderArea()
 
-cvars.AddChangeCallback("worldportals_resolution_percentage", function(convarName, oldValue, newValue)
-    resolutionScale = ClampPortalResolution(newValue)
-end)
+cvars.AddChangeCallback("worldportals_enabled", function() UpdateEnabled() end)
 
 cvars.AddChangeCallback("worldportals_recurse_depth", function(convarName, oldValue, newValue)
     recurseDepth = ClampRecurseDepth(newValue)
 end)
 
-cvars.AddChangeCallback("worldportals_min_render_area", function(convarName, oldValue, newValue)
-    minRenderArea = ClampMinRenderArea(newValue)
-end)
-
-function wp.GetMinRenderArea()
-    return minRenderArea
+function wp.IsEnabled()
+    return enabled
 end
 
 function wp.GetRecurseDepth()
@@ -102,13 +79,6 @@ end
 
 function wp.IsRenderingPortalView()
     return wp.drawing or (wp.renderdepth or 0) > 1
-end
-
-function wp.GetPortalRenderSize(width, height)
-    width = width or ScrW()
-    height = height or ScrH()
-
-    return math.max(1, math.floor(width * resolutionScale)), math.max(1, math.floor(height * resolutionScale))
 end
 
 -- Quantize a world position to a 4-unit grid so cameras that drift by less
@@ -201,7 +171,8 @@ end
 ---@return number height
 function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     depth = ClampRecurseDepth(depth)
-    width, height = wp.GetPortalRenderSize(width, height)
+    width = width or ScrW()
+    height = height or ScrH()
 
     -- d=1 stays per-portal stable: only one chain (the player view), and
     -- portal:SetTexture is consumed by downstream addons that expect a
@@ -384,14 +355,13 @@ local function clipQuadNearPlane(c1, c2, c3, c4, camPos, camFwd)
 end
 
 -- Polygon representation: flat float array {x1, y1, x2, y2, ...}.
--- Vertex count is #poly / 2 (or "is empty" via #poly == 0, "has triangle"
--- via #poly >= 6). Flat layout halves the per-vertex allocation burden
--- — previously each vertex was its own {x=, y=} table — which dominates
--- per-frame GC pressure on the debug overlay's recursive walk.
-
--- Frame-scoped polygon pool: clipping/intersection both produce many
--- intermediate polygons that all become garbage at end of frame. Hand them
--- back to the pool instead of letting them churn the GC.
+-- Vertex count is #poly / 2; "is empty" is #poly == 0; "has triangle"
+-- is #poly >= 6. Flat layout halves the per-vertex allocation burden
+-- vs the {x=, y=} table-of-tables representation.
+--
+-- Frame-scoped pool: clipping/intersection produce many intermediate
+-- polygons that all become garbage at end of frame. Hand them back to
+-- the pool instead of letting them churn the GC.
 local polyPool = {}
 local function acquirePoly()
     local n = #polyPool
@@ -407,20 +377,26 @@ local function releasePoly(p)
     if p then polyPool[#polyPool + 1] = p end
 end
 
+function wp.ReleasePoly(p)
+    releasePoly(p)
+end
+
 -- Project a portal's visible-face quad through an arbitrary camera into
--- player-screen pixel space, applying near-plane clipping and Hor+ FOV
--- scaling. Inner cameras render to screen-aligned RTs sampled at screen
--- UV, so a feature at inner-NDC (u, v) lands at player-screen NDC (u, v)
--- — the same conversion works at top level (player camera) and at every
--- recursion depth. Returns a flat polygon (0, 6, 8, or 10 entries).
+-- player-screen pixel space, applying near-plane clipping. Returns a
+-- flat polygon {x1, y1, x2, y2, ...} (0, 6, 8, or 10 entries).
+--
+-- camFov is the *rendered* horizontal FOV (i.e. the value RenderScene
+-- and CalcView pass around — already aspect-adjusted by the engine, NOT
+-- the 4:3-reference hfov from Player:GetFOV()). tanHalfV is derived as
+-- tanHalfH / aspect, which is the actual rendered vertical FOV. Don't
+-- apply the 0.75 Hor+ factor here; that conversion is only valid going
+-- from 4:3-reference hfov to vfov.
 function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
     local fwd = camAng:Forward()
     local right = camAng:Right()
     local up = camAng:Up()
-    -- Hor+ scaling: GetFOV() is the horizontal FOV at 4:3 reference; the
-    -- engine derives vfov from that and widens hfov for wider aspects.
-    local tanHalfV = math.tan(camFov * math.pi / 360) * 0.75
-    local tanHalfH = tanHalfV * aspect
+    local tanHalfH = math.tan(camFov * math.pi / 360)
+    local tanHalfV = tanHalfH / aspect
 
     local c1, c2, c3, c4 = getPortalCorners(portal)
     local clipped = clipQuadNearPlane(c1, c2, c3, c4, camPos, fwd)
@@ -437,43 +413,6 @@ function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
         out[#out + 1] = (1 - ndcY) * 0.5 * sh
     end
     return out
-end
-
-local function projectPolyOntoAxis(pts, ax, ay)
-    local mn, mx = math.huge, -math.huge
-    for i = 1, #pts, 2 do
-        local d = pts[i] * ax + pts[i+1] * ay
-        if d < mn then mn = d end
-        if d > mx then mx = d end
-    end
-    return mn, mx
-end
-
--- Test each edge of polygon `axes` as a candidate separating axis: project
--- both polygons onto the edge's normal and report disjoint ranges.
-local function hasSeparatingEdge(axes, other)
-    local n = #axes
-    if n < 6 then return false end
-    local p1x, p1y = axes[n-1], axes[n]
-    for i = 1, n, 2 do
-        local p2x, p2y = axes[i], axes[i+1]
-        local ax = -(p2y - p1y)
-        local ay = p2x - p1x
-        local aMin, aMax = projectPolyOntoAxis(axes, ax, ay)
-        local bMin, bMax = projectPolyOntoAxis(other, ax, ay)
-        if aMax < bMin or bMax < aMin then return true end
-        p1x, p1y = p2x, p2y
-    end
-    return false
-end
-
--- Convex-polygon intersection via Separating Axis Theorem. Both inputs are
--- assumed convex (which our near-plane-clipped quads always are).
-function wp.PolygonsIntersectSAT(a, b)
-    if #a < 6 or #b < 6 then return false end
-    if hasSeparatingEdge(a, b) then return false end
-    if hasSeparatingEdge(b, a) then return false end
-    return true
 end
 
 local function polygonSignedArea(poly)
@@ -586,13 +525,31 @@ function wp.IntersectConvexPolygons(subject, clip)
     return result
 end
 
--- Hand a polygon back to the per-frame pool.
-function wp.ReleasePoly(p)
-    releasePoly(p)
-end
-
 local framePortalRenderCount = 0
 local framePortalRenderByDepth = {}
+
+-- Per-frame log of every portal render that actually happened, in render
+-- order. Each entry stores the portal entity, the depth, and the camera
+-- pose used to render it (so the debug overlay can re-project the portal
+-- quad to screen without re-walking the recursion). Entries are reused
+-- across frames — the list grows to high-water and stays there.
+--
+-- Population is gated on `recordRenders` so the overlay-off case pays
+-- nothing per render. cl_debug toggles this flag from its convar
+-- callback; defaults off so consumers without the overlay never pay.
+local frameRenderedList = {}
+local frameRenderedCount = 0
+-- Parallel list of portals at depth>1 that were culled because their
+-- screen-projected quad has no overlap with the cumulative ancestor
+-- footprint (i.e. would not be visible through the stencil chain). The
+-- overlay paints these yellow.
+local frameCulledList = {}
+local frameCulledCount = 0
+local recordRenders = false
+
+function wp.SetRecordRenders(on)
+    recordRenders = on and true or false
+end
 
 function wp.GetFramePortalRenderCount()
     return framePortalRenderCount
@@ -600,6 +557,20 @@ end
 
 function wp.GetFramePortalRenderByDepth()
     return framePortalRenderByDepth
+end
+
+-- Returns (list, count). Read-only — do not mutate. count is the number of
+-- valid entries; list[i] beyond count holds stale data from earlier frames.
+function wp.GetFrameRenderedList()
+    return frameRenderedList, frameRenderedCount
+end
+
+-- Returns (list, count) for portals culled by the ancestor-overlap test
+-- (i.e. they'd render geometrically but their on-screen quad is entirely
+-- hidden by the cumulative ancestor stencil chain). Same shape as the
+-- rendered list. Only populated when recordRenders is true.
+function wp.GetFrameCulledList()
+    return frameCulledList, frameCulledCount
 end
 
 hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
@@ -610,10 +581,13 @@ hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
     for k in pairs(frameRenderedChains) do
         frameRenderedChains[k] = nil
     end
+    frameRenderedCount = 0
+    frameCulledCount = 0
 end)
 
 function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd )
     if ( wp.drawing ) then return end
+    if not enabled then return end
 
     depth = ClampRecurseDepth(depth)
     if depth > recurseDepth then return end
@@ -631,7 +605,6 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
         return
     end
 
-    local renderWidth, renderHeight = wp.GetPortalRenderSize(width, height)
     local aspect = width / height
 
     -- Disable phys gun glow and beam
@@ -654,18 +627,18 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             portal:SetTexture( texture )
         end
 
-        local poly
-        local cumulativePoly
-        -- Dedup: if a sibling chain already rendered this exact (depth,
-        -- camera, portal), the RT is already populated. Skip the work
-        -- entirely; no recursion either, since the d+1 RTs along this
-        -- branch are deterministic from (cam, portal) and were filled by
-        -- the first chain.
+        -- Eligible to render? Four culls:
+        -- 1. Chain dedup: sibling chain already rendered this (depth, cam,
+        --    portal) into the same RT.
+        -- 2. shouldrender: hooks + FOV cone + back-face + open/dormant.
+        -- 3. Exit clip-plane: portals entirely behind the parent's exit clip
+        --    plane would render to clipped-out content.
+        -- 4. Ancestor stencil overlap (depth>1): the on-screen quad of this
+        --    portal must overlap the cumulative ancestor footprint, otherwise
+        --    nothing of its render would be visible to the player anyway.
+        local shouldRender = false
+        local poly, cumulativePoly
         if not frameRenderedChains[chainKey] and wp.shouldrender(portal, plyOrigin, plyAngle, fov) then
-            -- Exit clip-plane cull: the parent's render pushes a
-            -- PushCustomClipPlane at its exit (normal = exit forward) that
-            -- discards scene fragments behind it. A portal entirely behind
-            -- that plane would render to clipped-out content, so skip it.
             local clipped = false
             if depth > 1 and parentExitPos and parentExitFwd then
                 local signedDist = (portal:GetPos() - parentExitPos):Dot(parentExitFwd)
@@ -675,48 +648,87 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             end
 
             if not clipped then
-                if minRenderArea > 0 then
-                    -- Compute screen polygon for visible-area culling. The
-                    -- polygon also threads as parentPoly to children so deeper
-                    -- portals can be culled against the cumulative footprint.
+                if depth == 1 then
+                    -- Top-level: no ancestor footprint to clip against.
+                    -- Compute polygon once so children can intersect with it.
                     poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
                     if #poly < 6 then
-                        wp.ReleasePoly(poly)
-                        poly = nil
-                    elseif depth > 1 and parentPoly then
+                        releasePoly(poly); poly = nil
+                    else
+                        cumulativePoly = poly
+                        shouldRender = true
+                    end
+                else
+                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
+                    if #poly < 6 then
+                        releasePoly(poly); poly = nil
+                    elseif parentPoly then
                         cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
-                        if #cumulativePoly < 6 or wp.PolygonArea(cumulativePoly) < minRenderArea then
-                            wp.ReleasePoly(poly)
-                            wp.ReleasePoly(cumulativePoly)
-                            poly = nil
-                            cumulativePoly = nil
+                        if #cumulativePoly < 6 then
+                            -- Hidden behind ancestor stencil chain — record
+                            -- as culled (yellow in overlay) and skip render.
+                            if recordRenders then
+                                local slot = frameCulledList[frameCulledCount + 1]
+                                if not slot then
+                                    slot = {camOrigin = Vector(), camAngle = Angle()}
+                                    frameCulledList[frameCulledCount + 1] = slot
+                                end
+                                slot.portal = portal
+                                slot.depth = depth
+                                slot.fov = fov
+                                slot.camOrigin:Set(plyOrigin)
+                                slot.camAngle:Set(plyAngle)
+                                frameCulledCount = frameCulledCount + 1
+                            end
+                            releasePoly(poly); poly = nil
+                            releasePoly(cumulativePoly); cumulativePoly = nil
+                        else
+                            shouldRender = true
                         end
                     else
                         cumulativePoly = poly
+                        shouldRender = true
                     end
-                else
-                    -- Area cull disabled: skip the polygon machinery entirely.
-                    -- It's the dominant per-frame computation source, so when
-                    -- the user has dialled the threshold to 0 we save a
-                    -- meaningful chunk of CPU. Use a static sentinel so the
-                    -- "would render" check downstream still passes; children
-                    -- in this branch will also see minRenderArea==0 and never
-                    -- inspect the polygon's contents.
-                    poly = POLY_SKIP_SENTINEL
                 end
             end
         end
 
         -- Late texture allocation for d > 1: only consume a pool slot once we
         -- know the chain will actually render.
-        if poly and not texture then
+        if shouldRender and not texture then
             texture = wp.GetPortalTexture(portal, width, height, depth, chainKey)
         end
 
-        if poly and texture then
+        if shouldRender and texture then
             framePortalRenderCount = framePortalRenderCount + 1
             framePortalRenderByDepth[depth] = (framePortalRenderByDepth[depth] or 0) + 1
             frameRenderedChains[chainKey] = true
+
+            -- Record the render for the debug overlay (only when enabled —
+            -- the overlay-off case must not pay per-render cost). Reuses
+            -- the slot table and its inner Vector/Angle/poly across frames
+            -- so we don't churn the GC at 30+ renders/frame. Copying the
+            -- camera and the cumulative polygon into our own buffers
+            -- insulates the cache from pool reuse and caller mutation.
+            if recordRenders then
+                local slot = frameRenderedList[frameRenderedCount + 1]
+                if not slot then
+                    slot = {camOrigin = Vector(), camAngle = Angle(), cumPoly = {}}
+                    frameRenderedList[frameRenderedCount + 1] = slot
+                end
+                slot.portal = portal
+                slot.depth = depth
+                slot.fov = fov
+                slot.camOrigin:Set(plyOrigin)
+                slot.camAngle:Set(plyAngle)
+                local cp = slot.cumPoly
+                for i = #cp, 1, -1 do cp[i] = nil end
+                if cumulativePoly then
+                    for i = 1, #cumulativePoly do cp[i] = cumulativePoly[i] end
+                end
+                frameRenderedCount = frameRenderedCount + 1
+            end
+
             if IsValid(exitPortal) then
                 hook.Call( "wp-prerender", GAMEMODE, portal, exitPortal, plyOrigin )
                 render.PushRenderTarget( texture )
@@ -754,9 +766,6 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     local childDepth = depth + 1
                     local drawPortalsInView = childDepth <= recurseDepth
                     if drawPortalsInView then
-                        -- Cumulative ancestor footprint already computed in
-                        -- the per-portal cull above; deeper portals are
-                        -- culled against every ancestor's stencil chain.
                         wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward)
                     end
 
@@ -776,8 +785,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     -- (the resulting GC churn was producing 25–30ms hitches
                     -- ~3 times per second).
                     local rv = wp._renderView
-                    rv.w = renderWidth
-                    rv.h = renderHeight
+                    rv.w = width
+                    rv.h = height
                     rv.fov = fov
                     rv.origin = camOrigin
                     rv.angles = camAngle
@@ -796,17 +805,16 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin )
             elseif falseWorld and falseWorld ~= "" then
-                wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, renderWidth, renderHeight, fov )
+                wp.renderfalseworld(texture, portal, plyOrigin, plyAngle, width, height, fov )
             end
         end
 
-        -- Recursive renderportals call has returned; the parent-poly we
-        -- handed it is no longer referenced. Return our owned pool buffers,
-        -- but never the static POLY_SKIP_SENTINEL (it's reused every frame).
-        if poly and poly ~= POLY_SKIP_SENTINEL then
-            wp.ReleasePoly(poly)
+        -- Recursion has returned; the parent-poly the child borrowed is
+        -- no longer referenced. Release back to the per-frame pool.
+        if poly then
+            releasePoly(poly)
             if cumulativePoly and cumulativePoly ~= poly then
-                wp.ReleasePoly(cumulativePoly)
+                releasePoly(cumulativePoly)
             end
         end
     end

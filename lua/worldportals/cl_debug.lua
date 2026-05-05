@@ -1,10 +1,31 @@
 
 CreateClientConVar("worldportals_debug", "0", true, false, "World Portals - Debug overlay (0=off, 1=clipped to visible, 2=rendered only, 3=all incl. culled)", 0, 3)
 
+-- Tell the renderer whether to log per-render entries for us. When the
+-- overlay is off the renderer skips that work entirely, so consumers
+-- without the overlay pay nothing. The renderer (cl_render.lua) loads
+-- after this file alphabetically, so wp.SetRecordRenders may not exist
+-- at first include — guard and rely on the cvar callback to sync once
+-- everything's loaded.
+local function syncRecord()
+    if wp.SetRecordRenders then
+        wp.SetRecordRenders(GetConVar("worldportals_debug"):GetInt() > 0)
+    end
+end
+syncRecord()
+cvars.AddChangeCallback("worldportals_debug", syncRecord, "WorldPortals_Debug_Sync")
+-- Sync once on first frame after all autorun files have loaded so the
+-- initial state matches the persisted convar value (covers the case
+-- where the convar value is non-zero at boot).
+hook.Add("InitPostEntity", "WorldPortals_Debug_InitSync", function()
+    syncRecord()
+    hook.Remove("InitPostEntity", "WorldPortals_Debug_InitSync")
+end)
+
 local COLOR_RENDERED = Color(0, 255, 0, 220)
 local COLOR_CULLED = Color(255, 60, 60, 220)
-local COLOR_CHILD = Color(255, 220, 0, 220)
 local COLOR_CHILD_VISIBLE = Color(255, 140, 0, 220)
+local COLOR_CHILD_HIDDEN = Color(255, 220, 0, 220)
 
 -- Polygon is a flat array {x1, y1, x2, y2, ...}.
 local function drawScreenPolygon(pts)
@@ -18,126 +39,108 @@ local function drawScreenPolygon(pts)
     end
 end
 
--- Recursively walk the portal tree, mirroring wp.renderportals' logic. At
--- depth 1 we draw every portal in the player's view (green if it would
--- render, red if not). At depth >= 2 we only draw portals the current
--- camera can see (skipping those wp.shouldrender rejects), colouring
--- orange when SAT-intersecting the immediate parent's polygon and
--- yellow otherwise. We descend into a portal's exit only when it
--- would actually render, since that mirrors what the renderer does.
-local function drawPortalOverlay(plyOrigin, plyAngles, plyFov, aspect, portals,
-                                 parentPoly, depth, maxDepth, mode,
-                                 parentExitPos, parentExitFwd)
-    if depth > maxDepth then return end
-
-    -- Per-mode visibility flags. Mode 1 also clips visible orange overlays
-    -- to the cumulative ancestor footprint so each one shows just the
-    -- portion the player can actually see through the stencil chain.
-    local showCulled
-    if depth == 1 then
-        showCulled = (mode == 1 or mode == 3)
-    else
-        showCulled = (mode == 3)
-    end
-    local clipOrange = (mode == 1)
-
-    local minArea = wp.GetMinRenderArea()
-
-    for _, portal in pairs(portals) do
-        if IsValid(portal) then
-            local rendered = wp.shouldrender(portal, plyOrigin, plyAngles, plyFov)
-            -- Mirror renderportals' exit clip-plane cull so the overlay
-            -- agrees with what actually gets rendered.
-            if rendered and depth > 1 and parentExitPos and parentExitFwd then
-                local signedDist = (portal:GetPos() - parentExitPos):Dot(parentExitFwd)
-                if signedDist + portal:BoundingRadius() < -0.5 then
-                    rendered = false
-                end
-            end
-            -- Top-level always considers culled portals (red); deeper levels
-            -- skip portals the current camera doesn't see (inner-cam cull).
-            if depth == 1 or rendered then
-                local pts = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngles, plyFov, aspect)
-
-                local visible, color, cumPts, ownsCum
-                if depth == 1 then
-                    visible = rendered
-                    cumPts = pts
-                    color = rendered and COLOR_RENDERED or COLOR_CULLED
-                else
-                    if parentPoly and #pts >= 6 then
-                        cumPts = wp.IntersectConvexPolygons(pts, parentPoly)
-                        ownsCum = true
-                        -- Geometric overlap with the cumulative ancestor
-                        -- footprint is the visibility test even at minArea==0
-                        -- — a portal that doesn't overlap the ancestor stencil
-                        -- chain isn't visible through it regardless of how
-                        -- big its on-screen quad is.
-                        visible = #cumPts >= 6 and wp.PolygonArea(cumPts) >= minArea
-                    else
-                        visible = false
-                    end
-                    color = visible and COLOR_CHILD_VISIBLE or COLOR_CHILD
-                end
-
-                if visible or showCulled then
-                    surface.SetDrawColor(color)
-                    local drawPts = pts
-                    if visible and depth > 1 and clipOrange and cumPts then
-                        drawPts = cumPts
-                    end
-                    drawScreenPolygon(drawPts)
-                end
-
-                if visible and depth + 1 <= maxDepth then
-                    local exit = portal:GetExit()
-                    if IsValid(exit) then
-                        local innerOrigin = wp.TransformPortalPos(plyOrigin, portal, exit)
-                        local innerAngles = wp.TransformPortalAngle(plyAngles, portal, exit)
-
-                        local exitFwd = exit:GetForward()
-                        local exitAngOffset = exit:GetExitAngOffset()
-                        if exitAngOffset then
-                            exitFwd:Rotate(exitAngOffset)
-                        end
-                        local exitOffset = exit:GetExitPosOffset()
-                        if IsValid(exit:GetParent()) then
-                            exitOffset:Rotate(exit:GetParent():GetAngles())
-                        end
-                        local exitPos = exit:GetPos() + exitOffset
-
-                        drawPortalOverlay(innerOrigin, innerAngles, plyFov, aspect, portals,
-                            cumPts, depth + 1, maxDepth, mode, exitPos, exitFwd)
-                    end
-                end
-
-                if ownsCum and cumPts ~= pts then wp.ReleasePoly(cumPts) end
-                wp.ReleasePoly(pts)
-            end
-        end
-    end
-end
+-- Reused across frames so the "show culled at d=1" mode doesn't allocate
+-- a fresh set table every HUDPaint.
+local renderedAtD1 = {}
 
 hook.Add("HUDPaint", "WorldPortals_Debug", function()
     local mode = GetConVar("worldportals_debug"):GetInt()
     if mode <= 0 then return end
 
+    local aspect = ScrW() / ScrH()
+    local list, count = wp.GetFrameRenderedList()
+
+    -- Pass 1: draw every actually-rendered chain, projecting through the
+    -- camera the renderer used. The renderer already did the recursion,
+    -- the shouldrender checks, the exit-plane culls, and the camera
+    -- transforms — we just visualise the result. No recursion here, no
+    -- TransformPortalPos/Angle, no shouldrender per portal. The whole
+    -- overlay collapses to N projection calls, where N is the actual
+    -- on-screen render count.
+    -- Mode 1 = "clipped to visible": orange polygons drawn as the
+    --          cumulative-ancestor-clipped shape (cumPoly) so they don't
+    --          escape the green parent. Faithful "what the player sees
+    --          through the stencil chain".
+    -- Mode 2 = "rendered only": orange polygons drawn as the portal's
+    --          full screen quad — escapes the green, shows where the
+    --          render actually occupies in NDC. No yellow/red.
+    -- Mode 3 = "all incl. culled": same as mode 2 plus yellow (overlap-
+    --          culled at depth>1) and red (top-level shouldrender failed).
+    local clipOrange = (mode == 1)
+
+    surface.SetDrawColor(COLOR_RENDERED)
+    local lastColor = COLOR_RENDERED
+    for i = 1, count do
+        local e = list[i]
+        if e then
+            local color = e.depth == 1 and COLOR_RENDERED or COLOR_CHILD_VISIBLE
+            if color ~= lastColor then
+                surface.SetDrawColor(color)
+                lastColor = color
+            end
+            if clipOrange and e.depth > 1 and e.cumPoly and #e.cumPoly >= 6 then
+                drawScreenPolygon(e.cumPoly)
+            else
+                local pts = wp.GetPortalScreenPolygon(e.portal, e.camOrigin, e.camAngle, e.fov, aspect)
+                drawScreenPolygon(pts)
+                wp.ReleasePoly(pts)
+            end
+        end
+    end
+
+    -- Yellow outlines for overlap-culled chains (mode 3 only) — would
+    -- render geometrically but ancestor stencil hides them entirely.
+    if mode == 3 then
+        local culledList, culledCount = wp.GetFrameCulledList()
+        if culledCount > 0 then
+            surface.SetDrawColor(COLOR_CHILD_HIDDEN)
+            for i = 1, culledCount do
+                local e = culledList[i]
+                if e then
+                    local pts = wp.GetPortalScreenPolygon(e.portal, e.camOrigin, e.camAngle, e.fov, aspect)
+                    drawScreenPolygon(pts)
+                    wp.ReleasePoly(pts)
+                end
+            end
+        end
+    end
+
+    -- Red outlines for top-level portals the renderer skipped (i.e.
+    -- shouldrender returned false from the player view). Shown in all
+    -- modes since these are useful at any debug level. Builds a set of
+    -- rendered-at-d=1 portals and draws the complement; shouldrender
+    -- for d=1 is implicit in "did the renderer log it?".
+    for k in pairs(renderedAtD1) do renderedAtD1[k] = nil end
+    for i = 1, count do
+        local e = list[i]
+        if e and e.depth == 1 then renderedAtD1[e.portal] = true end
+    end
+    surface.SetDrawColor(COLOR_CULLED)
     local camPos = EyePos()
     local camAng = EyeAngles()
-    local camFov = LocalPlayer():GetFOV()
-    local aspect = ScrW() / ScrH()
-    local portals = ents.FindByClass("linked_portal_door")
-    local maxDepth = wp.GetRecurseDepth()
+    -- GetPortalScreenPolygon expects the *rendered* horizontal FOV (post
+    -- aspect adjustment). Player:GetFOV() returns the 4:3 reference
+    -- hfov, so widen via Hor+:
+    --   vfov          = 2*atan(tan(hfov4_3/2) * 0.75)
+    --   rendered_hfov = 2*atan(tan(vfov/2) * aspect)
+    local hfov4_3 = LocalPlayer():GetFOV()
+    local camFov = math.deg(2 * math.atan(math.tan(math.rad(hfov4_3) * 0.5) * 0.75 * aspect))
+    for _, portal in ipairs(ents.FindByClass("linked_portal_door")) do
+        if IsValid(portal) and not renderedAtD1[portal] then
+            local pts = wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
+            drawScreenPolygon(pts)
+            wp.ReleasePoly(pts)
+        end
+    end
 
-    drawPortalOverlay(camPos, camAng, camFov, aspect, portals, nil, 1, maxDepth, mode)
-
+    -- Render-count breakdown.
     local SHADOW = Color(0, 0, 0, 220)
     local x = 16
     local lineH = 22
     local total = wp.GetFramePortalRenderCount()
     local byDepth = wp.GetFramePortalRenderByDepth()
+    local maxDepth = wp.GetRecurseDepth()
 
-    -- Center the block vertically around screen midline.
     local visibleDepths = 0
     for d = 1, maxDepth do
         if (byDepth[d] or 0) > 0 then visibleDepths = visibleDepths + 1 end
