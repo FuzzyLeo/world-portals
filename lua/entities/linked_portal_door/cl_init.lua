@@ -3,44 +3,48 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
-CreateClientConVar("worldportals_resolution_percentage", "100", true, false, "World Portals - Render resolution percentage for portals", 1, 100)
-
-local res = ((GetConVar("worldportals_resolution_percentage"):GetInt())/100)
-
-cvars.AddChangeCallback("worldportals_resolution_percentage", function(convar_name, value_old, value_new)
-    res = value_new/100
-end)
-
-function ENT:DrawPortal(exitPortal)
+-- matView2 (no stencil) callers pass color=white so the bound texture shows
+-- through, and solid=true so inverted thick portals close their front face
+-- instead of leaking world geometry through the 5-quads silhouette.
+function ENT:DrawPortal(exitPortal, color, solid)
+    color = color or color_black
     if not (self:GetModel() == "models/error.mdl") then
         render.ModelMaterialOverride( wp.matInvis )
         render.Model({model = self:GetModel(), pos = self:LocalToWorld(self:GetModelPos()), angle = self:LocalToWorldAngles(self:GetModelAng())})
         render.ModelMaterialOverride( nil )
     elseif self:GetThickness() == 0 or hook.Call("wp-allowthickportal", GAMEMODE, self, exitPortal)==false then
-        render.DrawQuadEasy( self:GetPos() -( self:GetForward() * 5 ), self:GetForward(), self:GetWidth(), self:GetHeight(), color_black, self:GetAngles().roll )
-    elseif self:GetInverted() then
+        render.DrawQuadEasy( self:GetPos() -( self:GetForward() * 5 ), self:GetForward(), self:GetWidth(), self:GetHeight(), color, self:GetAngles().roll )
+    elseif self:GetInverted() and not solid then
         for _,quad in ipairs(self.RenderQuads) do
-            render.DrawQuad(self:LocalToWorld(quad[1]), self:LocalToWorld(quad[2]), self:LocalToWorld(quad[3]), self:LocalToWorld(quad[4]), color_black)
+            render.DrawQuad(self:LocalToWorld(quad[1]), self:LocalToWorld(quad[2]), self:LocalToWorld(quad[3]), self:LocalToWorld(quad[4]), color)
         end
     else
-        render.DrawBox(self:GetPos(), self:GetAngles(), self.RenderMin, self.RenderMax, color_black)
+        render.DrawBox(self:GetPos(), self:GetAngles(), self.RenderMin, self.RenderMax, color)
     end
 end
 
 -- Draw world portals
 function ENT:Draw()
-    if wp.drawing or not self:GetOpen() then return end
-    local shouldrender,drawblack=wp.shouldrender(self)
+    if not (wp.IsEnabled and wp.IsEnabled()) then return end
+    if not self:GetOpen() then return end
+    if wp.drawing and not wp.drawportalsinview then return end
+
+    local shouldrender,drawblack=wp.shouldrender(self, wp.vieworigin, wp.viewangle, wp.viewfov)
     if not (shouldrender or drawblack) then return end
 
     local exitPortal = self:GetExit()
     local falseWorld = self:GetFalseWorld()
     if not IsValid(exitPortal) and not (falseWorld and falseWorld ~= "") then return end
+
+    -- Skip if our chain was culled this frame; the RT holds stale contents.
+    if shouldrender and not wp.IsPortalChainRendered(self) then return end
+
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
-    local width, height = ScrW()*res, ScrH()*res
-    local texture = GetRenderTarget("portal:" .. self:EntIndex() .. ":" .. width .. ":" .. height, width, height)
-    self:SetTexture( texture )
+    local texture, width, height, depth = wp.GetPortalDrawTexture(self)
+    if depth == 1 then
+        self:SetTexture( texture )
+    end
 
     if wp.rendermode then
         if shouldrender then
@@ -49,7 +53,8 @@ function ENT:Draw()
         else
             render.SetMaterial( wp.matBlack )
         end
-        self:DrawPortal(exitPortal)
+        -- See DrawPortal: matView2 needs solid=true and color=white to show the texture.
+        self:DrawPortal(exitPortal, shouldrender and color_white or color_black, true)
     else
         if shouldrender then
             render.ClearStencil()
