@@ -28,7 +28,6 @@ local function arctan2(y, x)
 end
 
 -- Checks if a given position and view angle is looking at another position
--- Adapted from SCP 173 https://steamcommunity.com/sharedfiles/filedetails/?id=830210642
 function wp.IsLookingAt( portal, portal_pos, view_pos, view_ang, view_fov )
     local radius = math.max(portal:BoundingRadius(), portal:GetThickness())
     local dx = portal_pos.x - view_pos.x
@@ -49,13 +48,9 @@ function wp.IsLookingAt( portal, portal_pos, view_pos, view_ang, view_fov )
             return true
         end
     else
-        -- Inside the bounding sphere: the cone test math breaks down, so we
-        -- fall back to "render anyway" for the close-range peripheral case.
-        -- But cull if the entire portal sits behind the view direction —
-        -- bounding sphere overstates extent badly for thin portals (a portal
-        -- you've already walked past would otherwise keep rendering its full
-        -- recursion subtree). Use the portal's actual oriented extent along
-        -- the view direction instead of the sphere radius.
+        -- Inside the bounding sphere the cone test breaks down, so render
+        -- unless the portal is fully behind the view (using its oriented
+        -- extent, not the sphere radius which overstates thin portals).
         local extent = (math.abs(portal:GetWidth()     * portal:GetRight():Dot(aimVec))
                       + math.abs(portal:GetHeight()    * portal:GetUp():Dot(aimVec))
                       + math.abs(portal:GetThickness() * portal:GetForward():Dot(aimVec))) / 2

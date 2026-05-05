@@ -20,9 +20,8 @@ wp.rendermode = false
 local WEAPON_COLOR_OFF = Vector(0, 0, 0)
 local THICK_PORTAL_POS = Vector()
 
--- Reused across all portal RT renders this frame to avoid allocating a fresh
--- view struct per render.RenderView call (33+ calls/frame in dual-pair test
--- maps was producing major GC pauses).
+-- Reused across every render.RenderView call this frame to avoid allocating
+-- a fresh view struct per portal render (was driving GC hitches).
 wp._renderView = {
     x = 0,
     y = 0,
@@ -83,19 +82,15 @@ function wp.IsRenderingPortalView()
     return wp.drawing or (wp.renderdepth or 0) > 1
 end
 
--- Quantize a world position to a 4-unit grid so cameras that drift by less
--- than that share a chain key (and reuse one RT) instead of churning a fresh
--- RT every frame as the player moves.
+-- Snap to a 4-unit grid so small camera drift reuses the same chain key / RT.
 local function quantizePos(v)
     return math.floor(v.x / 4 + 0.5), math.floor(v.y / 4 + 0.5), math.floor(v.z / 4 + 0.5)
 end
 
--- chainKey identifies which RT a given (depth, camera, portal) maps to.
--- At depth 1 every portal has only one chain (the player's view) so we omit
--- the camera and the d=1 RT stays stable across frames. At deeper levels we
--- fold the level camera in: chains that converge on identical cameras share
--- one RT (dedup), chains with different cameras get distinct RTs (no
--- last-write-wins overwrite between sibling chains).
+-- Identifies which RT a (depth, camera, portal) triple maps to. At d=1 the
+-- camera is omitted (only one chain — the player view — so the RT stays
+-- stable across frames). At d>1 the camera is folded in so sibling chains
+-- with different cameras get distinct RTs and identical ones dedup.
 local function getChainKey(depth, camPos, portal)
     if depth <= 1 or not camPos then
         local key = portal.WPDepth1ChainKey
@@ -123,14 +118,10 @@ local function getChainKey(depth, camPos, portal)
     return key
 end
 
--- Pool of RTs shared across all portals for d > 1 renders. The chain-key
--- design at d > 1 produces many unique keys (one per quantized camera per
--- portal per depth), so per-portal caching grew unbounded as the player
--- moved — every fresh GetRenderTarget name allocates a new GPU surface and
--- the engine registry never frees them, which thrashes memory and tanks
--- frametime. The pool reuses a fixed set of RT names with LRU eviction to
--- bound that allocation. d=1 RTs stay per-portal-stable so portal:SetTexture
--- (consumed downstream) keeps working across frames.
+-- Bounded LRU pool of RTs for d>1 renders. GetRenderTarget allocates a GPU
+-- surface per unique name and the engine never frees them, so per-portal
+-- caching across many quantized cameras would leak unboundedly. d=1 RTs
+-- stay per-portal-stable so portal:SetTexture keeps working downstream.
 local rtPool = {}
 local rtPoolCount = 0
 local rtPoolNextSlot = 0
@@ -141,15 +132,9 @@ hook.Add("PreRender", "WorldPortals_AdvanceFrame", function()
     frameCounter = frameCounter + 1
 end)
 
--- Per-entity per-frame scalar cache. Each portal's pos/forward/right/up are
--- the same for every render call this frame, but the engine getters
--- (portal:GetPos, portal:GetForward, ...) each allocate a fresh Vector. In
--- heavy-recurse scenes these were churning hundreds of Vectors per frame.
--- Caching as plain numbers on the entity table eliminates the alloc — the
--- next call this frame just reads scalar fields. Mutated entity poses are
--- still picked up: WPCacheFrame is reset implicitly when frameCounter
--- advances. Networked offsets (ExitPosOffset, ExitAngOffset) are cached
--- here too because they're accessed per render and otherwise allocate.
+-- Per-frame scalar cache for portal pose. Engine getters
+-- (GetPos/GetForward/...) each allocate a Vector; caching as plain numbers
+-- on the entity table eliminates that for every call after the first.
 local function cachePortalScalars(p)
     if p.WPCacheFrame == frameCounter then return end
     local pos = p:GetPos()
@@ -162,9 +147,8 @@ local function cachePortalScalars(p)
     p.WPUpX, p.WPUpY, p.WPUpZ = up.x, up.y, up.z
     local ang = p:GetAngles()
     p.WPAngP, p.WPAngY, p.WPAngR = ang.p, ang.y, ang.r
-    -- Networked offsets. ExitPosOffset is rotated by the parent's angles if
-    -- the portal is parented (Hammer-style relative offsets follow the
-    -- parent). Cache the *post-rotation* scalars so callers don't redo it.
+    -- ExitPosOffset is rotated by the parent's angles if parented; cache
+    -- the post-rotation scalars so callers don't redo it.
     local epo = p:GetExitPosOffset()
     local parent = p:GetParent()
     if IsValid(parent) then
@@ -177,22 +161,15 @@ local function cachePortalScalars(p)
 end
 wp.CachePortalScalars = cachePortalScalars
 
--- Static scratch buffers for the renderportals hot path. These get mutated
--- per render but never escape Lua (no engine call retains them after it
--- returns), so reusing them eliminates the per-render alloc churn.
+-- Static scratch buffers — mutated per call but never retained by engine.
 local EXIT_ANG_BUF = Angle()
 local EXIT_ANG_OFF_BUF = Angle()
 local VECTOR_ORIGIN = Vector()
 local VECTOR_UP = Vector(0, 0, 1)
 
--- Per-recursion-depth pool of reusable Vectors/Angles. Each depth's iteration
--- uses its own slot for camOrigin/camAngle/exitPos/exitFwd, so the recursive
--- call into depth+1 cannot overwrite the parent depth's values mid-render.
--- These are passed:
---   (a) to the recursive renderportals call as plyOrigin/plyAngle and
---       parentExitPos/parentExitFwd
---   (b) to render.RenderView via rv.origin/rv.angles after the recursion
---       returns, plus to PushCustomClipPlane for the exit-plane.
+-- One slot per recursion depth so the child call can't overwrite the
+-- parent's camOrigin/camAngle/exitPos/exitFwd while they're still in use
+-- across the recursion + post-recursion RenderView call.
 local depthSlots = {}
 local function getDepthSlots(depth)
     local s = depthSlots[depth]
@@ -208,19 +185,10 @@ local function getDepthSlots(depth)
     return s
 end
 
--- Allocation-light variants of TransformPortalPos / TransformPortalAngle:
--- write the result into a caller-provided Vector/Angle and reuse static
--- buffers for the intermediate exit-side pose. Original sh_utils versions
--- allocated ~9-10 Vectors/Angles per call; these allocate ~3 (the unavoidable
--- WorldToLocal[Angles] result + the LocalToWorld result pair).
--- Fully scalar TransformPortalPos. GMod convention (verified by probing
--- WorldToLocal at runtime): local.x = rel·forward, local.y = -(rel·right),
--- local.z = rel·up. The yaw-180 mirror negates local.x and local.y. The
--- inverse mapping for LocalToWorld is symmetric: world = portal_pos +
--- l.x*fwd - l.y*right + l.z*up. With the per-frame entity scalar cache
--- (cachePortalScalars), the no-exit-angle-offset path is allocation-free
--- — the engine getter calls (WorldToLocal/LocalToWorld) that originally
--- allocated 3 Vector/Angle pairs are eliminated.
+-- Scalarised TransformPortalPos. GMod local frame:
+--   local.x = rel·forward, local.y = -(rel·right), local.z = rel·up.
+-- The yaw-180 mirror negates local.x/y; LocalToWorld is the symmetric
+-- inverse. Allocation-free in the common (no exit-angle-offset) path.
 local function transformPortalPosInto(out, vec, portal, exit_portal)
     cachePortalScalars(portal)
     cachePortalScalars(exit_portal)
@@ -228,18 +196,14 @@ local function transformPortalPosInto(out, vec, portal, exit_portal)
     local rx = vec.x - portal.WPPosX
     local ry = vec.y - portal.WPPosY
     local rz = vec.z - portal.WPPosZ
-    -- WorldToLocal projection into portal frame.
     local lx = rx * portal.WPFwdX + ry * portal.WPFwdY + rz * portal.WPFwdZ
     local ly = -(rx * portal.WPRtX + ry * portal.WPRtY + rz * portal.WPRtZ)
     local lz = rx * portal.WPUpX + ry * portal.WPUpY + rz * portal.WPUpZ
-    -- Yaw-180 mirror.
     lx = -lx
     ly = -ly
 
-    -- Exit basis. The common case is no exit-angle-offset, so the cached
-    -- exit basis is the right one — zero allocs. Otherwise build the
-    -- combined Angle in a static buffer and ask the engine for its basis
-    -- (3 unavoidable allocs in this rarer branch).
+    -- Exit basis: cached scalars in the common case; engine basis only when
+    -- there's an exit-angle-offset (rare).
     local efx, efy, efz, erx, ery, erz, eux, euy, euz
     if exit_portal.WPEAOffP == 0 and exit_portal.WPEAOffY == 0 and exit_portal.WPEAOffR == 0 then
         efx, efy, efz = exit_portal.WPFwdX, exit_portal.WPFwdY, exit_portal.WPFwdZ
@@ -289,7 +253,7 @@ local function getPooledRT(chainKey, width, height)
         entry.lastFrame = frameCounter
         return entry.rt
     end
-    -- Resolution changed for this slot — drop it and reallocate below.
+    -- Resolution changed; drop and reallocate.
     if entry then
         rtPool[chainKey] = nil
         rtPoolCount = rtPoolCount - 1
@@ -303,9 +267,8 @@ local function getPooledRT(chainKey, width, height)
         return rt
     end
 
-    -- Evict LRU, but never an entry already used this frame (still needed
-    -- for the in-flight render). If everything is current-frame we've
-    -- exceeded the pool — return nil and let the caller skip the render.
+    -- Evict LRU, but never a current-frame entry (still in flight). If
+    -- everything's current we're over capacity — skip the render.
     local lruKey, lruFrame
     for k, e in pairs(rtPool) do
         if e.lastFrame < frameCounter and (not lruKey or e.lastFrame < lruFrame) then
@@ -318,8 +281,7 @@ local function getPooledRT(chainKey, width, height)
     if not victim then return nil end
     rtPool[lruKey] = nil
     if victim.width ~= width or victim.height ~= height then
-        -- Old slot was a different size; we'd have to allocate a new RT
-        -- anyway, which defeats pooling. Fall back to skip.
+        -- Wrong size; reallocating would defeat pooling. Skip instead.
         rtPoolCount = rtPoolCount - 1
         return nil
     end
@@ -339,9 +301,8 @@ function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     width = width or ScrW()
     height = height or ScrH()
 
-    -- d=1 stays per-portal stable: only one chain (the player view), and
-    -- portal:SetTexture is consumed by downstream addons that expect a
-    -- consistent texture handle frame-to-frame.
+    -- d=1 stays per-portal stable so portal:SetTexture is frame-to-frame
+    -- consistent for downstream consumers.
     if depth <= 1 then
         local texture = portal.WPTexture1
         if texture and portal.WPTexture1Width == width and portal.WPTexture1Height == height then
@@ -379,12 +340,8 @@ function wp.GetPortalDrawTexture(portal)
     return texture, width, height, depth
 end
 
--- Per-frame set of chain keys whose RT has actually been rendered this
--- frame. Used both by renderportals (to skip duplicate work when two
--- chains converge to the same camera/portal) and by entity Draw (to skip
--- drawing portals whose RT wasn't filled, e.g. because their chain was
--- area-culled at a parent level — without this the Draw would sample
--- stale or undefined RT content and smear it across the screen).
+-- Chain keys whose RT was filled this frame. renderportals uses it to dedup
+-- converging chains; entity Draw uses it to skip portals whose RT is stale.
 local frameRenderedChains = {}
 local frameShouldRenderCache = {}
 
@@ -398,23 +355,15 @@ function wp.IsPortalChainRendered(portal, depth, camPos)
     return frameRenderedChains[chainKey] == true
 end
 
--- Start drawing the portals
--- This prevents the game from crashing when loaded for the first time
+-- Defer first render until after PostRender (avoids first-load crash).
 hook.Add( "PostRender", "WorldPortals_StartRender", function()
     wp.drawing = false
     hook.Remove( "PostRender", "WorldPortals_StartRender" )
 end )
 
--- Per-frame shouldrender cache: keyed by chainKey (depth + quantized camera +
--- portal). The same portal/camera pair is consulted by both renderportals
--- (at recursion entry) and entity Draw (inside the RT render). Without this,
--- shouldrender ran ~290 times/frame in heavy recurse scenes — each call
--- allocated ~3 Vectors (portal:GetPos, GetForward, view_ang:Forward inside
--- IsLookingAt), driving ~30 KB/frame of GC pressure. With the cache, calls
--- collapse to ~one per unique (depth, cam, portal) triple.
---
--- Cache values: 0 = !render+!black, 1 = render, 2 = !render+black, 3 = render+black.
--- Encoded as a number to avoid any per-call table allocation. nil means miss.
+-- Per-frame cache keyed by chainKey. Result is encoded as a number so the
+-- cache doesn't allocate a table per entry:
+--   0 = !render+!black, 1 = render, 2 = !render+black, 3 = render+black.
 function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     if not camOrigin then camOrigin = EyePos() end
     if not camAngle then camAngle = EyeAngles() end
@@ -469,13 +418,9 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         end
     end
 
-    --don't render if the view is behind the portal
-    -- Use the thick-portal back-face plane only at the top level (player view)
-    -- so a player walking through a thick portal still sees its render during
-    -- the brief client-side window before the teleport net message arrives.
-    -- At depth>1 the inner camera lands inside the exit portal's thick volume
-    -- by construction (paired-portal mirror), and rendering it would create
-    -- an infinite recursion bouncing between the pair.
+    -- Back-face cull. Use the thick-portal back-plane only at d=1 — at d>1
+    -- the inner camera lands inside the exit's thick volume by construction
+    -- and would bounce-recurse forever.
     local thickness = portal:GetThickness()
     local planeX, planeY, planeZ = ppx, ppy, ppz
     if thickness > 0 and renderDepth <= 1 then
@@ -483,15 +428,12 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         planeY = ppy - pfy * thickness
         planeZ = ppz - pfz * thickness
     end
-    -- Inlined IsBehind: forward · (cam - plane_pos) < 0
     local behind = pfx * (camOrigin.x - planeX) + pfy * (camOrigin.y - planeY) + pfz * (camOrigin.z - planeZ) < 0
     if behind then
         frameShouldRenderCache[cacheKey] = 0
         return false
     end
-    -- IsLookingAt still expects a Vector for portal_pos (called with the
-    -- thick-or-thin plane position). Reuse a static buffer to avoid allocating
-    -- a fresh Vector per call.
+    -- IsLookingAt expects a Vector; reuse a static buffer.
     THICK_PORTAL_POS.x = planeX
     THICK_PORTAL_POS.y = planeY
     THICK_PORTAL_POS.z = planeZ
@@ -586,14 +528,9 @@ local function clipAndProjectEdge(out, ax, ay, az, bx, by, bz, cpx, cpy, cpz, fw
     end
 end
 
--- Polygon representation: flat float array {x1, y1, x2, y2, ...}.
--- Vertex count is #poly / 2; "is empty" is #poly == 0; "has triangle"
--- is #poly >= 6. Flat layout halves the per-vertex allocation burden
--- vs the {x=, y=} table-of-tables representation.
---
--- Frame-scoped pool: clipping/intersection produce many intermediate
--- polygons that all become garbage at end of frame. Hand them back to
--- the pool instead of letting them churn the GC.
+-- Polygons are flat arrays {x1, y1, x2, y2, ...}; vertex count is #poly/2.
+-- Pool reuses buffers across the many intermediate polys produced by
+-- clipping/intersection per frame.
 local polyPool = {}
 local function acquirePoly()
     local n = #polyPool
@@ -613,21 +550,14 @@ function wp.ReleasePoly(p)
     releasePoly(p)
 end
 
--- Project a portal's visible-face quad through an arbitrary camera into
--- player-screen pixel space, applying near-plane clipping. Returns a
--- flat polygon {x1, y1, x2, y2, ...} (0, 6, 8, or 10 entries).
+-- Project a portal's visible-face quad through a camera into screen pixel
+-- space, near-plane-clipped. Returns a flat polygon (0, 6, 8, or 10 entries).
+-- camFov is the rendered horizontal FOV (already aspect-adjusted by the
+-- engine — don't re-apply Hor+ here).
 --
--- camFov is the *rendered* horizontal FOV (i.e. the value RenderScene
--- and CalcView pass around — already aspect-adjusted by the engine, NOT
--- the 4:3-reference hfov from Player:GetFOV()). tanHalfV is derived as
--- tanHalfH / aspect, which is the actual rendered vertical FOV. Don't
--- apply the 0.75 Hor+ factor here; that conversion is only valid going
--- from 4:3-reference hfov to vfov.
--- Single-slot cache for the camera basis: renderportals iterates ~7 portals
--- per recursion level all sharing the same plyAngle, so the second through
--- last calls in a level skip the three engine getter allocs and reuse the
--- last-computed basis. Cache key is the (p, y, r) triple — comparing
--- numbers avoids the Angle __eq's componentwise userdata path.
+-- Single-slot cache for the camera basis: renderportals iterates many
+-- portals per level sharing one plyAngle, so subsequent calls skip the
+-- three engine getter allocs.
 local lastCamP, lastCamY, lastCamR
 local lastCamFwdX, lastCamFwdY, lastCamFwdZ = 0, 0, 0
 local lastCamRtX, lastCamRtY, lastCamRtZ = 0, 0, 0
@@ -656,7 +586,7 @@ function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
     cachePortalScalars(portal)
     local hw = portal:GetWidth() * 0.5
     local hh = portal:GetHeight() * 0.5
-    -- visible face sits at pos - fwd*5 (matches DrawQuadEasy in entity cl_init.lua)
+    -- Visible face sits at pos - fwd*5 (matches DrawQuadEasy in cl_init.lua).
     local cx = portal.WPPosX - portal.WPFwdX * 5
     local cy = portal.WPPosY - portal.WPFwdY * 5
     local cz = portal.WPPosZ - portal.WPFwdZ * 5
@@ -707,11 +637,9 @@ local function reversePolygonInto(src, dst)
     return dst
 end
 
--- Sutherland-Hodgman: clip `subject` against directed edge (e1 → e2),
--- keeping vertices on the half-plane the right normal points into.
--- Caller is responsible for ensuring the clip edge winding gives a
--- right-normal-inward orientation. Result written into `out` (cleared
--- first), so callers can swap two reusable polygon buffers across edges.
+-- Sutherland-Hodgman: clip `subject` against edge (e1 → e2), keeping the
+-- right-normal-inward half. Result written to `out` (cleared first) so
+-- callers can ping-pong two buffers across edges.
 local function clipPolygonAgainstEdge(subject, e1x, e1y, e2x, e2y, out)
     for i = #out, 1, -1 do out[i] = nil end
     local n = #subject
@@ -743,13 +671,9 @@ local function clipPolygonAgainstEdge(subject, e1x, e1y, e2x, e2y, out)
     return out
 end
 
--- Convex-polygon intersection via iterated Sutherland-Hodgman: clip the
--- subject polygon against every edge of the convex clip polygon. Returns
--- the (possibly empty) intersection polygon — a freshly-acquired pool
--- buffer, so callers should `releasePoly` it when done. Polygons projected
--- through portal-recursed cameras can come out with either winding
--- (paired-portal basis flips), so canonicalize the clip to the
--- right-normal-inward orientation that clipPolygonAgainstEdge expects.
+-- Iterated Sutherland-Hodgman convex/convex intersection. Caller owns the
+-- returned pool buffer (call releasePoly when done). Portal-recursed cameras
+-- can produce either winding so we canonicalize the clip first.
 function wp.IntersectConvexPolygons(subject, clip)
     local result = acquirePoly()
     if #subject == 0 or #clip < 6 then return result end
@@ -762,8 +686,7 @@ function wp.IntersectConvexPolygons(subject, clip)
         clip = reversePolygonInto(clip, clipBuf)
     end
 
-    -- Two reusable buffers ping-ponged across edges so the per-edge clip
-    -- doesn't allocate a fresh polygon table per iteration.
+    -- Ping-pong two buffers so per-edge clipping doesn't alloc per iteration.
     local bufA = acquirePoly()
     for i = 1, #subject do bufA[i] = subject[i] end
     local bufB = acquirePoly()
@@ -782,8 +705,7 @@ function wp.IntersectConvexPolygons(subject, clip)
         prevX, prevY = cx, cy
     end
 
-    -- Copy the final result so the two scratch buffers can be returned to
-    -- the pool independently of the result's lifetime.
+    -- Copy out so the scratch buffers can return to the pool now.
     for i = 1, #current do result[i] = current[i] end
     releasePoly(bufA)
     releasePoly(bufB)
@@ -794,21 +716,11 @@ end
 local framePortalRenderCount = 0
 local framePortalRenderByDepth = {}
 
--- Per-frame log of every portal render that actually happened, in render
--- order. Each entry stores the portal entity, the depth, and the camera
--- pose used to render it (so the debug overlay can re-project the portal
--- quad to screen without re-walking the recursion). Entries are reused
--- across frames — the list grows to high-water and stays there.
---
--- Population is gated on `recordRenders` so the overlay-off case pays
--- nothing per render. cl_debug toggles this flag from its convar
--- callback; defaults off so consumers without the overlay never pay.
+-- Debug-overlay log of every render this frame, in order. Slots reused
+-- across frames; gated on `recordRenders` so overlay-off pays nothing.
 local frameRenderedList = {}
 local frameRenderedCount = 0
--- Parallel list of portals at depth>1 that were culled because their
--- screen-projected quad has no overlap with the cumulative ancestor
--- footprint (i.e. would not be visible through the stencil chain). The
--- overlay paints these yellow.
+-- Same shape, for portals culled by ancestor-overlap (yellow in overlay).
 local frameCulledList = {}
 local frameCulledCount = 0
 local recordRenders = false
@@ -825,16 +737,13 @@ function wp.GetFramePortalRenderByDepth()
     return framePortalRenderByDepth
 end
 
--- Returns (list, count). Read-only — do not mutate. count is the number of
--- valid entries; list[i] beyond count holds stale data from earlier frames.
+-- Returns (list, count). Read-only; entries beyond count are stale.
 function wp.GetFrameRenderedList()
     return frameRenderedList, frameRenderedCount
 end
 
--- Returns (list, count) for portals culled by the ancestor-overlap test
--- (i.e. they'd render geometrically but their on-screen quad is entirely
--- hidden by the cumulative ancestor stencil chain). Same shape as the
--- rendered list. Only populated when recordRenders is true.
+-- Same shape, for ancestor-overlap-culled portals. Only populated when
+-- recordRenders is on.
 function wp.GetFrameCulledList()
     return frameCulledList, frameCulledCount
 end
@@ -876,7 +785,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
     local aspect = width / height
 
-    -- Disable phys gun glow and beam
+    -- Suppress phys gun glow/beam during the portal renders.
     local ply = LocalPlayer()
     local oldWepColor
     if depth == 1 then
@@ -886,31 +795,20 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
     for _, portal in ipairs( portals ) do
 
-        -- Only d=1 needs an unconditional texture (for portal:SetTexture, used
-        -- by downstream consumers). For d > 1 we defer pool allocation until
-        -- we've actually passed all culls — otherwise the pool fills up with
-        -- slots earmarked for portals that won't render this frame, starving
-        -- the chains that will.
+        -- d=1 needs a texture unconditionally for portal:SetTexture; d>1
+        -- defers pool allocation until past all culls so doomed chains don't
+        -- starve real ones for pool slots.
         local texture
         if depth == 1 then
             texture = wp.GetPortalTexture(portal, width, height, depth)
             portal:SetTexture( texture )
         end
 
-        -- Eligible to render? Four culls:
-        -- 1. Chain dedup: sibling chain already rendered this (depth, cam,
-        --    portal) into the same RT.
-        -- 2. shouldrender: hooks + FOV cone + back-face + open/dormant.
-        -- 3. Exit clip-plane: portals entirely behind the parent's exit clip
-        --    plane would render to clipped-out content.
-        -- 4. Ancestor stencil overlap (depth>1): the on-screen quad of this
-        --    portal must overlap the cumulative ancestor footprint, otherwise
-        --    nothing of its render would be visible to the player anyway.
+        -- Four culls: chain dedup, shouldrender, parent exit-clip plane,
+        -- ancestor screen-overlap.
         local shouldRender = false
         local poly, cumulativePoly
         local chainKey = getChainKey(depth, plyOrigin, portal)
-        -- shouldrender owns the per-frame cache now (keyed by chainKey),
-        -- so we just call it — repeat callers within the frame hit the cache.
         local renderable = wp.shouldrender(portal, plyOrigin, plyAngle, fov) and true or false
 
         if renderable and not frameRenderedChains[chainKey] then
@@ -927,8 +825,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
             if not clipped then
                 if depth == 1 then
-                    -- Top-level: no ancestor footprint to clip against.
-                    -- Compute polygon once so children can intersect with it.
+                    -- No ancestor; compute poly once for children to clip against.
                     poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
                     if #poly < 6 then
                         releasePoly(poly); poly = nil
@@ -943,8 +840,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     elseif parentPoly then
                         cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
                         if #cumulativePoly < 6 then
-                            -- Hidden behind ancestor stencil chain — record
-                            -- as culled (yellow in overlay) and skip render.
+                            -- Hidden behind ancestor stencil chain.
                             if recordRenders then
                                 local slot = frameCulledList[frameCulledCount + 1]
                                 if not slot then
@@ -971,8 +867,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             end
         end
 
-        -- Late texture allocation for d > 1: only consume a pool slot once we
-        -- know the chain will actually render.
+        -- d>1: only consume a pool slot now that all culls have passed.
         if shouldRender and not texture then
             texture = wp.GetPortalTexture(portal, width, height, depth, chainKey)
         end
@@ -987,12 +882,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             portal.WPLastRenderedHeight = height
             portal.WPLastRenderedTexture = texture
 
-            -- Record the render for the debug overlay (only when enabled —
-            -- the overlay-off case must not pay per-render cost). Reuses
-            -- the slot table and its inner Vector/Angle/poly across frames
-            -- so we don't churn the GC at 30+ renders/frame. Copying the
-            -- camera and the cumulative polygon into our own buffers
-            -- insulates the cache from pool reuse and caller mutation.
+            -- Record for the debug overlay; reuses slots across frames.
+            -- Copy the camera and poly so pool reuse can't mutate them.
             if recordRenders then
                 local slot = frameRenderedList[frameRenderedCount + 1]
                 if not slot then
@@ -1020,15 +911,11 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
                     local oldClip = render.EnableClipping( true )
 
-                    -- Cache exit-side scalars once per frame; subsequent reads
-                    -- here are plain table lookups instead of allocating
-                    -- Vector/Angle from the engine each call.
                     cachePortalScalars(exitPortal)
                     cachePortalScalars(portal)
 
-                    -- Per-depth scratch buffers so the recursion at line below
-                    -- can read parentExitPos/parentExitFwd from this depth's
-                    -- slot without the child overwriting them.
+                    -- Per-depth slots so the child recursion can't overwrite
+                    -- this depth's parentExitPos/Fwd while still in use.
                     local slots = getDepthSlots(depth)
                     local exit_forward = slots.exitFwd
                     local exit_pos = slots.exitPos
@@ -1036,9 +923,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     exit_forward.x = exitPortal.WPFwdX
                     exit_forward.y = exitPortal.WPFwdY
                     exit_forward.z = exitPortal.WPFwdZ
-                    -- Apply the entity's exit-angle offset (rare; usually all
-                    -- zero) by rotating the cached forward via a static Angle
-                    -- buffer — no alloc.
+                    -- Apply the (rare) exit-angle offset via a static buffer.
                     if exitPortal.WPEAOffP ~= 0 or exitPortal.WPEAOffY ~= 0 or exitPortal.WPEAOffR ~= 0 then
                         EXIT_ANG_OFF_BUF.p = exitPortal.WPEAOffP
                         EXIT_ANG_OFF_BUF.y = exitPortal.WPEAOffY
@@ -1046,8 +931,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                         exit_forward:Rotate(EXIT_ANG_OFF_BUF)
                     end
 
-                    -- exit_pos = exitPortal:GetPos() + (parent-rotated offset);
-                    -- both are cached as scalars by cachePortalScalars.
+                    -- exit_pos = exitPortal:GetPos() + parent-rotated offset.
                     exit_pos.x = exitPortal.WPPosX + exitPortal.WPEPOffX
                     exit_pos.y = exitPortal.WPPosY + exitPortal.WPEPOffY
                     exit_pos.z = exitPortal.WPPosZ + exitPortal.WPEPOffZ
@@ -1089,10 +973,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     wp.drawingdepth = depth
                     wp.drawtexturedepth = childDepth
                     wp.drawportalsinview = drawPortalsInView
-                    -- Reuse a single view struct so the 30+ portal-render
-                    -- calls per frame don't each allocate a fresh Lua table
-                    -- (the resulting GC churn was producing 25–30ms hitches
-                    -- ~3 times per second).
+                    -- Reuse one view struct across every render this frame.
                     local rv = wp._renderView
                     rv.w = width
                     rv.h = height
@@ -1100,8 +981,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     rv.origin = camOrigin
                     rv.angles = camAngle
                     rv.zfar = zfar
-                    -- Scalarised dot: avoids the two Vectors that
-                    -- `exit_pos - exit_forward * 0.5` would allocate.
+                    -- Scalar form of `exit_forward · (exit_pos - exit_forward*0.5)`.
                     local efx, efy, efz = exit_forward.x, exit_forward.y, exit_forward.z
                     local clipD = efx * (exit_pos.x - efx * 0.5)
                                 + efy * (exit_pos.y - efy * 0.5)
@@ -1127,8 +1007,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             end
         end
 
-        -- Recursion has returned; the parent-poly the child borrowed is
-        -- no longer referenced. Release back to the per-frame pool.
+        -- Recursion done; release this iteration's polys back to the pool.
         if poly then
             releasePoly(poly)
             if cumulativePoly and cumulativePoly ~= poly then

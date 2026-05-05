@@ -3,13 +3,9 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
--- color: vertex tint for box/quad geometry (defaults to opaque black for
--- silhouette/stencil writes; pass color_white in the matView2 path so the
--- bound texture shows through unmodulated).
--- solid: when true, inverted thick portals render as a full 6-face box rather
--- than the 5-inner-quads variant. The 5-quads variant exists so the stencil
--- path can mask against an open front; outside that path (matView2) the open
--- front just leaks underlying world geometry, so callers should pass solid=true.
+-- matView2 (no stencil) callers pass color=white so the bound texture shows
+-- through, and solid=true so inverted thick portals close their front face
+-- instead of leaking world geometry through the 5-quads silhouette.
 function ENT:DrawPortal(exitPortal, color, solid)
     color = color or color_black
     if not (self:GetModel() == "models/error.mdl") then
@@ -40,9 +36,7 @@ function ENT:Draw()
     local falseWorld = self:GetFalseWorld()
     if not IsValid(exitPortal) and not (falseWorld and falseWorld ~= "") then return end
 
-    -- If our chain wasn't rendered this frame (parent area-cull, etc.) the RT
-    -- holds stale or undefined content. Bail out so the world geometry behind
-    -- the portal shows through, rather than smearing last frame's contents.
+    -- Skip if our chain was culled this frame; the RT holds stale contents.
     if shouldrender and not wp.IsPortalChainRendered(self) then return end
 
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
@@ -59,9 +53,7 @@ function ENT:Draw()
         else
             render.SetMaterial( wp.matBlack )
         end
-        -- solid=true: close the inverted-thick front so world geometry inside
-        -- the box (e.g. police-box carpet) doesn't leak through.
-        -- color=white when shouldrender so matView2's texture is visible.
+        -- See DrawPortal: matView2 needs solid=true and color=white to show the texture.
         self:DrawPortal(exitPortal, shouldrender and color_white or color_black, true)
     else
         if shouldrender then
