@@ -20,7 +20,7 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         recursion:SetMinMax(1, 9)
         recursion:SetDecimals(0)
         recursion:SetConVar("worldportals_recurse_depth")
-        recursion:SetTooltip("Default: 1. Higher = portals seen through portals seen through portals... up to N levels.")
+        recursion:SetTooltip("Default: 2. Higher = portals seen through portals seen through portals... up to 9 levels.")
         panel:AddItem(recursion)
 
         local debugMode = vgui.Create("DComboBox")

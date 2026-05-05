@@ -41,7 +41,7 @@ wp._renderView = {
 }
 
 CreateClientConVar("worldportals_enabled", "1", true, false, "Enable World Portals rendering. When 0, portals don't render and entity Draw bails — frees the per-frame engine RenderView allocations the recursion produces.", 0, 1)
-CreateClientConVar("worldportals_recurse_depth", "1", true, false, "World Portals - Maximum portal recursion depth", 1, 9)
+CreateClientConVar("worldportals_recurse_depth", "2", true, false, "World Portals - Maximum portal recursion depth", 1, 9)
 
 local enabled = true
 local recurseDepth = 1
