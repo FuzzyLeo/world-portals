@@ -1,5 +1,10 @@
 wp.falseworlds = wp.falseworlds or {}
 
+local VECTOR_ORIGIN = Vector()
+local VECTOR_UP = Vector( 0, 0, 1 )
+local ANGLE_ZERO = Angle()
+local ANGLE_YAW_180 = Angle( 0, 180, 0 )
+
 function wp.addfalseworld( T )
     if not T.id then
         error( "wp.addfalseworld: missing T.id" )
@@ -8,6 +13,41 @@ function wp.addfalseworld( T )
 end
 
 if SERVER then return end
+
+local function TransformFalseWorldAngle( angle, portal, falseWorldAng )
+    local l_angle = portal:WorldToLocalAngles( angle )
+    l_angle:RotateAroundAxis( VECTOR_UP, 180 )
+    local _, w_angle = LocalToWorld( VECTOR_ORIGIN, l_angle, VECTOR_ORIGIN, falseWorldAng )
+
+    return w_angle
+end
+
+local function TransformFalseWorldPos( pos, portal, falseWorldPos, falseWorldAng )
+    local l_pos = portal:WorldToLocal( pos )
+    l_pos:Rotate( ANGLE_YAW_180 )
+    local w_pos = LocalToWorld( l_pos, ANGLE_ZERO, falseWorldPos, falseWorldAng )
+
+    return w_pos
+end
+
+local function GetFalseWorldExitPose( portal, falseWorldPos, falseWorldAng )
+    local exitPos = falseWorldPos
+    local exitAng = falseWorldAng
+
+    local posOffset = portal:GetExitPosOffset()
+    if posOffset.x ~= 0 or posOffset.y ~= 0 or posOffset.z ~= 0 then
+        local rotatedOffset = Vector( posOffset.x, posOffset.y, posOffset.z )
+        rotatedOffset:Rotate( falseWorldAng )
+        exitPos = falseWorldPos + rotatedOffset
+    end
+
+    local angOffset = portal:GetExitAngOffset()
+    if angOffset.p ~= 0 or angOffset.y ~= 0 or angOffset.r ~= 0 then
+        exitAng = falseWorldAng + angOffset
+    end
+
+    return exitPos, exitAng
+end
 
 function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
     local fwname = portal:GetFalseWorld()
@@ -18,15 +58,15 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
         return
     end
 
-    local fw_origin = falseworld.origin --[[@as Vector?]]
-    local origin = Vector()
-    if fw_origin then
-        origin = -fw_origin
-    end
+    local falseWorldPos = falseworld.pos or VECTOR_ORIGIN
+    local falseWorldAng = falseworld.ang or ANGLE_ZERO
     local baselight = falseworld.baselight or Vector()
+    local exitPos, exitAng = GetFalseWorldExitPose( portal, falseWorldPos, falseWorldAng )
+    local camOrigin = TransformFalseWorldPos( plyOrigin, portal, exitPos, exitAng )
+    local camAngle = TransformFalseWorldAngle( plyAngle, portal, exitAng )
 
-    cam.Start3D( plyOrigin + origin, plyAngle, fov, 0, 0, width, height )
-        local exit_forward = portal:GetForward() * -1
+    cam.Start3D( camOrigin, camAngle, fov, 0, 0, width, height )
+        local exit_forward = exitAng:Forward()
 
         local oldEC = render.EnableClipping( true )
 
@@ -36,17 +76,17 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
             local scale = rawpart.scale
             local color = rawpart.color or Vector( 1, 1, 1 )
             local pos = rawpart.pos or Vector()
-            local angle = rawpart.angle or Angle()
+            local ang = rawpart.ang or ANGLE_ZERO
             local rendergroup = rawpart.rendergroup
             local part = ClientsideModel( model, rendergroup )
             if not IsValid( part ) then return end
             part:SetNoDraw( true )
             if skybox then
-                part:SetPos( plyOrigin + origin )
+                part:SetPos( camOrigin )
             else
                 part:SetPos( pos )
             end
-            part:SetAngles( angle )
+            part:SetAngles( ang )
             render.SetColorModulation( color.x, color.y, color.z )
             if not skybox then
                 render.ResetModelLighting( baselight.x, baselight.y, baselight.z )
@@ -74,7 +114,7 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
             DrawPart( skybox )
         end
 
-        render.PushCustomClipPlane( exit_forward, exit_forward:Dot( origin - exit_forward * 0.5 ) )
+        render.PushCustomClipPlane( exit_forward, exit_forward:Dot( exitPos - exit_forward * 0.5 ) )
             for _, v in pairs( falseworld.models ) do
                 DrawPart( v )
             end
@@ -95,8 +135,7 @@ function wp.renderfalseworld( texture, portal, plyOrigin, plyAngle, width, heigh
         render.SuppressEngineLighting( true )
         render.FogMode( MATERIAL_FOG_NONE )
 
-        local plyOriginLocal = plyOrigin - portal:GetPos()
-        wp.createfalseworld( portal, plyOriginLocal, plyAngle, width, height, fov )
+        wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
 
         render.OverrideDepthEnable( false, false )
         render.FogMode( oldFog )
