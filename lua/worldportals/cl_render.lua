@@ -263,24 +263,54 @@ hook.Add( "PostRender", "WorldPortals_StartRender", function()
     hook.Remove( "PostRender", "WorldPortals_StartRender" )
 end )
 
+-- Per-frame shouldrender cache: keyed by chainKey (depth + quantized camera +
+-- portal). The same portal/camera pair is consulted by both renderportals
+-- (at recursion entry) and entity Draw (inside the RT render). Without this,
+-- shouldrender ran ~290 times/frame in heavy recurse scenes — each call
+-- allocated ~3 Vectors (portal:GetPos, GetForward, view_ang:Forward inside
+-- IsLookingAt), driving ~30 KB/frame of GC pressure. With the cache, calls
+-- collapse to ~one per unique (depth, cam, portal) triple.
+--
+-- Cache values: 0 = !render+!black, 1 = render, 2 = !render+black, 3 = render+black.
+-- Encoded as a number to avoid any per-call table allocation. nil means miss.
 function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     if not camOrigin then camOrigin = EyePos() end
     if not camAngle then camAngle = EyeAngles() end
     if not camFOV then camFOV = LocalPlayer():GetFOV() end
+
+    local cacheDepth = wp.drawtexturedepth or wp.renderdepth or 1
+    local cacheKey = getChainKey(cacheDepth, camOrigin, portal)
+    local cached = frameShouldRenderCache[cacheKey]
+    if cached ~= nil then
+        return (cached % 2) == 1, cached >= 2
+    end
+
     local exitPortal = portal:GetExit()
 
     if not IsValid( exitPortal ) then
         local falseWorld = portal:GetFalseWorld()
-        if not (falseWorld and falseWorld ~= "") then return false end
+        if not (falseWorld and falseWorld ~= "") then
+            frameShouldRenderCache[cacheKey] = 0
+            return false
+        end
     end
-    
+
     local renderDepth = wp.GetPortalRenderDepth()
     local override, drawblack = hook.Call( "wp-shouldrender", GAMEMODE, portal, exitPortal, camOrigin, camAngle, camFOV, renderDepth )
-    if override ~= nil then return override, drawblack end
+    if override ~= nil then
+        frameShouldRenderCache[cacheKey] = (override and 1 or 0) + (drawblack and 2 or 0)
+        return override, drawblack
+    end
 
-    if not portal:GetOpen() then return false end
+    if not portal:GetOpen() then
+        frameShouldRenderCache[cacheKey] = 0
+        return false
+    end
 
-    if portal:IsDormant() then return false end
+    if portal:IsDormant() then
+        frameShouldRenderCache[cacheKey] = 0
+        return false
+    end
 
     local disappearDist = portal:GetDisappearDist()
     if disappearDist > 0 then
@@ -288,9 +318,13 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         local dx = camOrigin.x - portalPos.x
         local dy = camOrigin.y - portalPos.y
         local dz = camOrigin.z - portalPos.z
-        if dx * dx + dy * dy + dz * dz > disappearDist * disappearDist then return false end
+        if dx * dx + dy * dy + dz * dz > disappearDist * disappearDist then
+            frameShouldRenderCache[cacheKey] = 0
+            return false
+        end
     end
-    
+
+
     --don't render if the view is behind the portal
     -- Use the thick-portal back-face plane only at the top level (player view)
     -- so a player walking through a thick portal still sees its render during
@@ -308,10 +342,17 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         portalPos = THICK_PORTAL_POS
     end
     local behind = wp.IsBehind( camOrigin, portalPos, forward )
-    if behind then return false end
+    if behind then
+        frameShouldRenderCache[cacheKey] = 0
+        return false
+    end
     local lookingAt = wp.IsLookingAt( portal, portalPos, camOrigin, camAngle, camFOV )
-    if not lookingAt then return false end
+    if not lookingAt then
+        frameShouldRenderCache[cacheKey] = 0
+        return false
+    end
 
+    frameShouldRenderCache[cacheKey] = 1
     return true
 end
 
@@ -701,16 +742,9 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
         local shouldRender = false
         local poly, cumulativePoly
         local chainKey = getChainKey(depth, plyOrigin, portal)
-        local renderable
-        if depth > 1 then
-            renderable = frameShouldRenderCache[chainKey]
-            if renderable == nil then
-                renderable = wp.shouldrender(portal, plyOrigin, plyAngle, fov) and true or false
-                frameShouldRenderCache[chainKey] = renderable
-            end
-        else
-            renderable = wp.shouldrender(portal, plyOrigin, plyAngle, fov) and true or false
-        end
+        -- shouldrender owns the per-frame cache now (keyed by chainKey),
+        -- so we just call it — repeat callers within the frame hit the cache.
+        local renderable = wp.shouldrender(portal, plyOrigin, plyAngle, fov) and true or false
 
         if renderable and not frameRenderedChains[chainKey] then
             local clipped = false
