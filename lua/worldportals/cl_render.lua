@@ -454,18 +454,20 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         return false
     end
 
+    cachePortalScalars(portal)
+    local ppx, ppy, ppz = portal.WPPosX, portal.WPPosY, portal.WPPosZ
+    local pfx, pfy, pfz = portal.WPFwdX, portal.WPFwdY, portal.WPFwdZ
+
     local disappearDist = portal:GetDisappearDist()
     if disappearDist > 0 then
-        local portalPos = portal:GetPos()
-        local dx = camOrigin.x - portalPos.x
-        local dy = camOrigin.y - portalPos.y
-        local dz = camOrigin.z - portalPos.z
+        local dx = camOrigin.x - ppx
+        local dy = camOrigin.y - ppy
+        local dz = camOrigin.z - ppz
         if dx * dx + dy * dy + dz * dz > disappearDist * disappearDist then
             frameShouldRenderCache[cacheKey] = 0
             return false
         end
     end
-
 
     --don't render if the view is behind the portal
     -- Use the thick-portal back-face plane only at the top level (player view)
@@ -474,21 +476,26 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     -- At depth>1 the inner camera lands inside the exit portal's thick volume
     -- by construction (paired-portal mirror), and rendering it would create
     -- an infinite recursion bouncing between the pair.
-    local portalPos = portal:GetPos()
-    local forward = portal:GetForward()
     local thickness = portal:GetThickness()
+    local planeX, planeY, planeZ = ppx, ppy, ppz
     if thickness > 0 and renderDepth <= 1 then
-        THICK_PORTAL_POS.x = portalPos.x - forward.x * thickness
-        THICK_PORTAL_POS.y = portalPos.y - forward.y * thickness
-        THICK_PORTAL_POS.z = portalPos.z - forward.z * thickness
-        portalPos = THICK_PORTAL_POS
+        planeX = ppx - pfx * thickness
+        planeY = ppy - pfy * thickness
+        planeZ = ppz - pfz * thickness
     end
-    local behind = wp.IsBehind( camOrigin, portalPos, forward )
+    -- Inlined IsBehind: forward · (cam - plane_pos) < 0
+    local behind = pfx * (camOrigin.x - planeX) + pfy * (camOrigin.y - planeY) + pfz * (camOrigin.z - planeZ) < 0
     if behind then
         frameShouldRenderCache[cacheKey] = 0
         return false
     end
-    local lookingAt = wp.IsLookingAt( portal, portalPos, camOrigin, camAngle, camFOV )
+    -- IsLookingAt still expects a Vector for portal_pos (called with the
+    -- thick-or-thin plane position). Reuse a static buffer to avoid allocating
+    -- a fresh Vector per call.
+    THICK_PORTAL_POS.x = planeX
+    THICK_PORTAL_POS.y = planeY
+    THICK_PORTAL_POS.z = planeZ
+    local lookingAt = wp.IsLookingAt( portal, THICK_PORTAL_POS, camOrigin, camAngle, camFOV )
     if not lookingAt then
         frameShouldRenderCache[cacheKey] = 0
         return false
