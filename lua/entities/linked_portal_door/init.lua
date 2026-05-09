@@ -57,12 +57,16 @@ function ENT:KeyValue( key, value )
     end
 end
 
--- Teleportation
+-- Teleportation. Players are handled by the predicted SetupMove path in
+-- sh_teleport.lua so the local view stays in lockstep with the server; Touch
+-- only handles non-player entities (props, NPCs, ragdolls), which can't be
+-- client-predicted anyway.
 function ENT:Touch( ent )
     if (not self:GetOpen()) or (not self:GetEnableTeleport()) then return end
+    if ent:IsPlayer() then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
-    
+
     if IsValid( self:GetParent() ) then
         local ents = constraint.GetAllConstrainedEntities( self:GetParent() ) -- don't mess up this contraption we're on
         for _,v in pairs( ents ) do
@@ -83,14 +87,7 @@ function ENT:Touch( ent )
             local new_pos = wp.TransformPortalPos( ent:GetPos(), self, exit )
             local new_velocity = wp.TransformPortalVector( ent:GetVelocity(), self, exit )
             local new_angle = wp.TransformPortalAngle( ent:GetAngles(), self, exit )
-            if ent:IsPlayer() then
-                local height = ent:OBBMaxs().z
-                local temppos = Vector(0,0,height)
-                temppos:Rotate(Angle(0,0,new_angle.r))
-                new_pos = new_pos + Vector(0,0,(temppos.z - height) / 2) 
-            end
-        
-            
+
             ---@type table<integer, {[1]: Vector, [2]: Angle}>?
             local store
             if ent:IsRagdoll() then
@@ -103,26 +100,12 @@ function ENT:Touch( ent )
                 end
             end
             ent:SetPos( new_pos )
-            if ent:IsPlayer() then
-                if vrmod and vrmod.IsPlayerInVR(ent) then
-                    net.Start("WorldPortals_VRMod_SetAngle")
-                        net.WriteDouble(wp.TransformPortalAngle(Angle(0,0,0), self, exit).y)
-                    net.Send(ent)
-                end
-                ent:SetEyeAngles( Angle(new_angle.p, new_angle.y, 0) )
-                ent:SetLocalVelocity( new_velocity )
-                wp.AlertPlayerOnTeleport( ent, new_angle.r )
-                self:TriggerOutput("OnPlayerTeleportFromMe", ent)
-                exit:TriggerOutput("OnPlayerTeleportToMe", ent)
-            else
-                ent:SetAngles( new_angle )
-
-                ent:SetVelocity( new_velocity )
-                local phys = ent:GetPhysicsObject()
-                if IsValid(phys) then phys:SetVelocityInstantaneous( new_velocity ) end
-                self:TriggerOutput("OnEntityTeleportFromMe", ent)
-                exit:TriggerOutput("OnEntityTeleportToMe", ent)
-            end
+            ent:SetAngles( new_angle )
+            ent:SetVelocity( new_velocity )
+            local phys = ent:GetPhysicsObject()
+            if IsValid(phys) then phys:SetVelocityInstantaneous( new_velocity ) end
+            self:TriggerOutput("OnEntityTeleportFromMe", ent)
+            exit:TriggerOutput("OnEntityTeleportToMe", ent)
             if store then
                 for i=0,ent:GetPhysicsObjectCount() do
                     local bone=ent:GetPhysicsObjectNum(i)

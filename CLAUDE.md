@@ -48,8 +48,8 @@ Plus rendering state and helpers in `cl_render.lua`:
 
 Three files:
 - `shared.lua` — type/render group, `Initialize`, `SetupBounds` (recomputes render/collision bounds + the 5 quads used for inverted/thick rendering), and the `SetupDataTables` block that creates every networked field (`Exit`, `Width`, `Height`, `Thickness`, `Transparency`, `ZFar`, `Open`, `EnableTeleport`, `Inverted`, `CustomLink`, `ExitPosOffset`/`ExitAngOffset`, `ModelPos`/`ModelAng`). `NetworkVarNotify`s rebuild bounds when width/height/thickness change.
-- `init.lua` (server) — `KeyValue` handles Hammer entity I/O (`partnername`, `width` ×2, `height` ×2, `thickness`, `DisappearDist`, `angles`, `EnableTeleport`, `Open`, output `On*` are forwarded to `StoreOutput`); `Touch` does the actual teleport (entry-side check via `DistanceToPlane`, fires the `wp-shouldtp` hook for veto, transforms pos/velocity/angle, special-cases ragdolls by snapshotting all physics objects' local pose then re-applying after `SetPos`, sends the `WorldPortals_VRMod_SetAngle` net message in VR mode and `WorldPortals_Teleport` to all clients); `AcceptInput` handles the Hammer inputs.
-- `cl_init.lua` — `Draw` is the stencil-and-stencil dance. With the model error.mdl marker (no model assigned) it draws a black box (or thick portal quads when `Thickness > 0`); with a model assigned it draws via `render.Model`. When `wp.rendermode` is true (we're inside `RenderView` for another portal) it uses the simpler `matView2`-textured path instead of stenciling. The non-`rendermode` path writes a stencil mask, draws the portal black/transparent, then rerenders the contents through `matView` only where the stencil matches — alpha blended via `cam.Start2D` if `Transparency > 0`. Receives `WorldPortals_VRMod_SetAngle` (rotates VR origin) and `WorldPortals_Teleport` (mirrors the server-side `SetPos`/`SetAngles` so non-server-authoritative clients don't see lag).
+- `init.lua` (server) — `KeyValue` handles Hammer entity I/O (`partnername`, `width` ×2, `height` ×2, `thickness`, `DisappearDist`, `angles`, `EnableTeleport`, `Open`, output `On*` are forwarded to `StoreOutput`); `Touch` teleports **non-player entities only** (props, NPCs, ragdolls — players go through the predicted SetupMove path in `sh_teleport.lua`): entry-side check via `DistanceToPlane`, fires the `wp-shouldtp` hook for veto, transforms pos/velocity/angle, special-cases ragdolls by snapshotting all physics objects' local pose then re-applying after `SetPos`, broadcasts `WorldPortals_Teleport` so clients update the entity's position immediately rather than waiting for the snapshot. `AcceptInput` handles the Hammer inputs.
+- `cl_init.lua` — `Draw` is the stencil-and-stencil dance. With the model error.mdl marker (no model assigned) it draws a black box (or thick portal quads when `Thickness > 0`); with a model assigned it draws via `render.Model`. When `wp.rendermode` is true (we're inside `RenderView` for another portal) it uses the simpler `matView2`-textured path instead of stenciling. The non-`rendermode` path writes a stencil mask, draws the portal black/transparent, then rerenders the contents through `matView` only where the stencil matches — alpha blended via `cam.Start2D` if `Transparency > 0`. Receives `WorldPortals_VRMod_SetAngle` (rotates VR origin) and `WorldPortals_Teleport` (mirrors the server-side `SetPos`/`SetAngles` so non-server-authoritative clients don't see lag — for `LocalPlayer` this is skipped since they predicted it themselves; instead `wp.RecordNetTeleport` records the broadcast pos so the debug HUD can flag predict/snapshot disagreement).
 
 ### Stencil rendering pipeline (`cl_render.lua`)
 
@@ -68,6 +68,24 @@ This is the most fragile / load-bearing piece. The flow in a single frame:
 
 The order matters and the `wp.drawing` / `wp.rendermode` guards are why almost every callback in this addon checks them first.
 
+### Predicted player teleport (`sh_teleport.lua`)
+
+Players go through a `SetupMove` hook that runs in the prediction loop on both server and client (LocalPlayer only on the client side), so the local view stays in lockstep with the server without waiting for a snapshot.
+
+Per-tick flow inside the hook:
+
+1. Skip dead/zero-velocity players.
+2. Iterate `linked_portal_door`s. Skip portals that are closed, not teleport-enabled, have no exit, or that the player isn't moving toward (`velocity:Dot(fwd) >= 0`).
+3. Swept eye-pos test: this tick's eye and next-tick eye (`eye + vel * FrameTime()`) on opposite sides of the portal's `GetPos()` plane. The reference plane is `portal:GetPos()` rather than the visible face (5 units in front), because that's the same plane `cl_render.lua`'s `wp.shouldrender` uses for back-face culling — once the eye crosses it, the stencil stops rendering and the player would see "through" the portal volume. Firing on this plane guarantees the teleport always beats the cull.
+4. Local-space Y/Z bbox check at the projected crossing point (matches `wp.GetFirstPortalHit`).
+5. `wp-shouldtp` hook for veto — registered shared in Doors so client and server can both consult it. Inner `ShouldTeleportPortal` handlers stay server-only; on the client `CallHook` returns nil (no veto), so the client optimistically allows and the server has the final say.
+6. Apply: `mv:SetOrigin(newPos)`, `mv:SetVelocity(newVel)`, `mv:SetAngles(clampedAng)`, `ply:SetEyeAngles(clampedAng)`, `cmd:SetViewAngles(clampedAng)`. **All four mutations matter**: `mv:SetOrigin/SetVelocity` drive the move; `mv:SetAngles` is what gamemovement reads to interpret W/S/A/D direction (without it the engine still uses the pre-teleport view, causing a "skid" on direction-changing portals); `ply:SetEyeAngles` is what actually rotates the camera (`cmd:SetViewAngles` alone only mutates the input cmd struct); `cmd:SetViewAngles` keeps the next move's input direction consistent.
+7. On first-time-predicted client OR on server: also call `ply:SetPos(newPos)`. `mv:SetOrigin` updates the move buffer but **doesn't reset the entity's AbsOrigin interpolation cache**, so without this `ply:GetPos()` lerps from old to new over a few frames (visible as a position slide). `ply:SetPos` is the canonical snap path — same one the broadcast hits for remote clients. Skipped during resimulation.
+8. Server branch: VR yaw offset (`WorldPortals_VRMod_SetAngle`), `ForcePlayerDrop`, entity outputs, `wp-teleport` hook, broadcast `WorldPortals_Teleport`.
+9. First-time-predicted client branch: roll fade trigger (`wp.rotating = newAng.r` for `cl_teleport.lua`'s `CalcView` to interpolate down), `wp-teleport` hook, debug-HUD record.
+
+Non-player entities still go through `ENT:Touch` in `init.lua` — they can't be client-predicted (server-authoritative VPhysics).
+
 ### Trace redirection (`sh_teleport.lua`)
 
 Two things:
@@ -82,9 +100,11 @@ The monkey-patch is global: every consumer's traces go through it whether they k
 - `SetupPlayerVisibility` adds the exit portal's origin to PVS for any player who can see the entry. Without this, the exit-side render target draws empty. This is the only way GMod allows out-of-PVS scenes to be visible.
 - `PairWithExits` runs at `InitPostEntity` and `PostCleanupMap`: walks every `linked_portal_door` and `:SetExit(ents.FindByName(:GetPartnerName())[1])` if its exit is invalid. Required because Hammer load order isn't guaranteed and a portal may initialize before its partner exists.
 
-### Client: view roll on teleport (`cl_teleport.lua`)
+### Client: view roll on teleport + debug HUD (`cl_teleport.lua`)
 
-When the server teleports the local player and the new angle has nonzero roll, `WorldPortals_TeleportAlert` arrives with the roll value. A `CalcView` hook then `math.Approach`es the roll back to 0 over a few frames so the world doesn't snap-rotate on landing. Fully cosmetic; pulling it out is fine if the math ever causes problems.
+A `CalcView` hook reads `wp.rotating` (set by the predicted SetupMove path when the new view has nonzero roll) and `math.Approach`es the roll back to 0 over a few frames so the world doesn't snap-rotate on landing. Fully cosmetic; pulling it out is fine if the math ever causes problems.
+
+The same file owns the predicted-teleport debug HUD, gated behind the `worldportals_debug_predict` cvar. It buffers the last 5 SetupMove-driven teleports (`wp.RecordTeleportEvent`) and the last server broadcast position for the local player (`wp.RecordNetTeleport`), and renders per-frame ply state + nearest-portal swept-test inputs. Useful for inspecting paused frames during a teleport — the live `EyeAng`/`Pos` lines vs the recorded `oldAng → newAng` / `oldPos → newPos` make it obvious whether prediction set what you expect, and the "last net broadcast" line will fire if server snapshot disagrees.
 
 ### Optional integrations
 
@@ -98,6 +118,7 @@ When the server teleports the local player and the new angle has nonzero roll, `
 - **For `pairs`/`ipairs` loops, drop the variable you don't use rather than naming it.** `for _, v in pairs(t)` discards the key, `for k in pairs(t)` discards the value, `for _ = 1, n do` for plain N-iteration. The `unused` lint is on so future dead `local x = expensive_call()` survivors get flagged — keep the noise floor at zero by using these forms.
 - When monkey-patching engine globals (`util.TraceLine`, `render.RenderView`), capture the original under a `Real*` alias **once** before reassigning, and reinstall the patch in `InitPostEntity` so addons that load after us don't clobber it.
 - Hooks fired for downstream consumers (`wp-shouldrender`, `wp-trace`, `wp-tracefilter`, `wp-shouldtp`, `wp-teleport`, `wp-allowthickportal`, `wp-predraw`/`postdraw`, `wp-prerender`/`postrender`) all use `hook.Call(name, GAMEMODE, ...)`. Don't change the calling convention without updating consumers (Doors hooks all of these).
+- `wp-shouldtp` and `wp-teleport` fire on **both client and server** for predicted player teleports — the client fires gated on `IsFirstTimePredicted()` from inside `SetupMove`, the server fires from the same path during its own gamemovement step. Consumers must register the hooks shared (Doors moved its `wp-shouldtp` registration out of an `if SERVER` block for this). Inner `CallHook` chains can stay server-only and return nil on the client; the client optimistically allows and the server is authoritative.
 - `wp-prerender` and `wp-postrender` fire as `(portal, exitPortal, plyOrigin, depth)` — the recursion depth (1 = top-level player view, 2+ = nested through-portal renders). Consumers that mutate engine state across the pre/post pair (e.g. cordon's `SetNoDraw` save/restore) MUST guard on `depth > 1` to skip nested renders, or the parent's saved state gets clobbered by a nested pre-render before the parent's post-render restores it.
 
 ## Tooling

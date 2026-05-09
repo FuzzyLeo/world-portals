@@ -113,6 +113,13 @@ net.Receive("WorldPortals_Teleport", function()
     local new_pos = net.ReadVector()
     local new_angle = net.ReadAngle()
     if IsValid(portal) and IsValid(ent) then
+        -- LocalPlayer predicts their own teleport in SetupMove and fires
+        -- wp-teleport client-side from there; skip the snapshot apply so we
+        -- don't double-fire the hook or yank the predicted position.
+        if ent == LocalPlayer() then
+            if wp.RecordNetTeleport then wp.RecordNetTeleport(new_pos) end
+            return
+        end
         ent:SetPos( new_pos )
         if not ent:IsPlayer() then
             ent:SetAngles( new_angle )
