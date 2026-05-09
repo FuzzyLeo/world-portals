@@ -1,4 +1,7 @@
 wp.falseworlds = wp.falseworlds or {}
+-- Client-only cache of long-lived ClientsideModel parts keyed by false-world id.
+-- Kept separate from wp.falseworlds so re-registering doesn't have to fight table.Copy.
+wp.falseworldscache = wp.falseworldscache or {}
 
 local VECTOR_ORIGIN = Vector()
 local VECTOR_UP = Vector( 0, 0, 1 )
@@ -9,10 +12,39 @@ function wp.addfalseworld( T )
     if not T.id then
         error( "wp.addfalseworld: missing T.id" )
     end
+    if CLIENT then
+        local cache = wp.falseworldscache[T.id]
+        if cache then
+            if IsValid( cache.skybox ) then cache.skybox:Remove() end
+            for _, ent in pairs( cache.parts or {} ) do
+                if IsValid( ent ) then ent:Remove() end
+            end
+            wp.falseworldscache[T.id] = nil
+        end
+    end
     wp.falseworlds[T.id] = table.Copy( T )
 end
 
 if SERVER then return end
+
+local function ensureCache( id )
+    local cache = wp.falseworldscache[id]
+    if cache then return cache end
+    cache = { parts = {} }
+    wp.falseworldscache[id] = cache
+    return cache
+end
+
+-- Apply state that's static for the lifetime of the cached entity.
+local function setupPart( rawpart, ent )
+    ent:SetNoDraw( true )
+    ent:SetAngles( rawpart.ang or ANGLE_ZERO )
+    if rawpart.scale then
+        local mat = Matrix()
+        mat:Scale( rawpart.scale )
+        ent:EnableMatrix( "RenderMultiply", mat )
+    end
+end
 
 local function TransformFalseWorldAngle( angle, portal, falseWorldAng )
     local l_angle = portal:WorldToLocalAngles( angle )
@@ -58,9 +90,11 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
         return
     end
 
+    local cache = ensureCache( fwname )
+
     local falseWorldPos = falseworld.pos or VECTOR_ORIGIN
     local falseWorldAng = falseworld.ang or ANGLE_ZERO
-    local baselight = falseworld.baselight or Vector()
+    local baselight = falseworld.baselight or VECTOR_ORIGIN
     local exitPos, exitAng = GetFalseWorldExitPose( portal, falseWorldPos, falseWorldAng )
     local camOrigin = TransformFalseWorldPos( plyOrigin, portal, exitPos, exitAng )
     local camAngle = TransformFalseWorldAngle( plyAngle, portal, exitAng )
@@ -70,53 +104,52 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
 
         local oldEC = render.EnableClipping( true )
 
-        local function DrawPart( rawpart )
-            local skybox = rawpart.skybox
-            local model = rawpart.model
-            local scale = rawpart.scale
-            local color = rawpart.color or Vector( 1, 1, 1 )
-            local pos = rawpart.pos or Vector()
-            local ang = rawpart.ang or ANGLE_ZERO
-            local rendergroup = rawpart.rendergroup
-            local part = ClientsideModel( model, rendergroup )
-            if not IsValid( part ) then return end
-            part:SetNoDraw( true )
-            if skybox then
+        if falseworld.skybox then
+            local rawpart = falseworld.skybox
+            local part = cache.skybox
+            if not IsValid( part ) then
+                part = ClientsideModel( rawpart.model, rawpart.rendergroup )
+                if IsValid( part ) then
+                    setupPart( rawpart, part )
+                    cache.skybox = part
+                end
+            end
+            if IsValid( part ) then
                 part:SetPos( camOrigin )
-            else
-                part:SetPos( pos )
-            end
-            part:SetAngles( ang )
-            render.SetColorModulation( color.x, color.y, color.z )
-            if not skybox then
-                render.ResetModelLighting( baselight.x, baselight.y, baselight.z )
-                render.SetLocalModelLights( falseworld.lights )
-            end
-            if scale then
-                local mat = Matrix()
-                mat:Scale( scale )
-                part:EnableMatrix( "RenderMultiply", mat )
-            end
-            if skybox then
+                local color = rawpart.color
+                if color then
+                    render.SetColorModulation( color.x, color.y, color.z )
+                else
+                    render.SetColorModulation( 1, 1, 1 )
+                end
                 render.OverrideDepthEnable( true, false )
                 part:DrawModel()
                 render.OverrideDepthEnable( false, false )
-            else
-                part:DrawModel()
             end
-            -- clientside entity MUST be removed after drawing or they stack up every frame
-            part:Remove()
-        end
-
-        if falseworld.skybox then
-            local skybox = falseworld.skybox
-            skybox.skybox = true
-            DrawPart( skybox )
         end
 
         render.PushCustomClipPlane( exit_forward, exit_forward:Dot( exitPos - exit_forward * 0.5 ) )
-            for _, v in pairs( falseworld.models ) do
-                DrawPart( v )
+            for key, rawpart in pairs( falseworld.models ) do
+                local part = cache.parts[key]
+                if not IsValid( part ) then
+                    part = ClientsideModel( rawpart.model, rawpart.rendergroup )
+                    if IsValid( part ) then
+                        setupPart( rawpart, part )
+                        part:SetPos( rawpart.pos or VECTOR_ORIGIN )
+                        cache.parts[key] = part
+                    end
+                end
+                if IsValid( part ) then
+                    local color = rawpart.color
+                    if color then
+                        render.SetColorModulation( color.x, color.y, color.z )
+                    else
+                        render.SetColorModulation( 1, 1, 1 )
+                    end
+                    render.ResetModelLighting( baselight.x, baselight.y, baselight.z )
+                    render.SetLocalModelLights( falseworld.lights )
+                    part:DrawModel()
+                end
             end
         render.PopCustomClipPlane()
 
