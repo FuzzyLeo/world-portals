@@ -4,6 +4,11 @@
 -- in lockstep without waiting for the server snapshot. Non-player entities
 -- still go through ENT:Touch — they can't be client-predicted.
 local ANGLE_VR_YAW_REF = Angle(0, 0, 0)
+-- How far in front of the portal plane the eye may already be and still fire
+-- this tick (see the crossing test). Small enough to be imperceptible vs the
+-- exact-plane timing, large enough to catch a slow creeper whose accelerated
+-- tick would otherwise step over the plane between two SetupMove evaluations.
+local CROSS_SKIN = 2
 local function predictPlayerTeleport(ply, mv, cmd)
     if CLIENT and ply ~= LocalPlayer() then return end
     if not ply:Alive() then return end
@@ -12,11 +17,26 @@ local function predictPlayerTeleport(ply, mv, cmd)
     if velocity:LengthSqr() < 1 then return end
 
     local origin = mv:GetOrigin()
-    local eyePos = ply:EyePos()
     local frameTime = FrameTime()
+
+    -- Two reference points, used for two different jobs (see each test below):
+    --   * the EYE drives the forward crossing — firing as the eye reaches the
+    --     portal plane reproduces the previous "teleport about where the eye
+    --     is / halfway through" timing, and keeps the camera the visible-face
+    --     render offset's worth in front of the portal so it never clips
+    --     through before the teleport lands. This holds at any portal pitch/
+    --     yaw/roll because it is measured along the portal's own normal.
+    --   * the hull CENTRE drives the face bounds — a jump that lifts the eye
+    --     above the door's top edge while the body still passes through must
+    --     still count, and the eye-Z test was what wrongly rejected it.
+    local eyePos = ply:EyePos()
     local nextEyeX = eyePos.x + velocity.x * frameTime
     local nextEyeY = eyePos.y + velocity.y * frameTime
     local nextEyeZ = eyePos.z + velocity.z * frameTime
+    local omins, omaxs = ply:OBBMins(), ply:OBBMaxs()
+    local hullCenterX = origin.x + (omins.x + omaxs.x) * 0.5
+    local hullCenterY = origin.y + (omins.y + omaxs.y) * 0.5
+    local hullCenterZ = origin.z + (omins.z + omaxs.z) * 0.5
 
     for _, portal in ipairs(ents.FindByClass("linked_portal_door")) do
         -- Freshly-spawned portals can appear in FindByClass before their
@@ -32,20 +52,59 @@ local function predictPlayerTeleport(ply, mv, cmd)
         if velocity:Dot(fwd) >= 0 then goto cont end
 
         local pos = portal:GetPos()
-        -- Test against the back-face cull plane in cl_render.lua's
-        -- wp.shouldrender (= portal:GetPos() for thin portals). Once the eye
-        -- crosses this plane the stencil stops rendering, exposing the world
-        -- behind the portal — so the teleport must fire before then.
+        -- Crossing test against the portal plane (= portal:GetPos(), the same
+        -- plane cl_render.lua's wp.shouldrender culls the back face on — once
+        -- the eye crosses it the stencil stops rendering and the world behind
+        -- shows through, so the teleport must fire before then).
         local distNow  = (eyePos.x - pos.x) * fwd.x + (eyePos.y - pos.y) * fwd.y + (eyePos.z - pos.z) * fwd.z
-        if distNow <= 0 then goto cont end
+        -- Re-teleport guard. The eye must be IN FRONT of the plane to fire,
+        -- EXCEPT inside a thick portal's own depth. A teleport lands the player
+        -- ON / just behind the EXIT face (the mirror transform puts the eye a
+        -- unit or two past it), and the pair are each other's exits, so a plain
+        -- "must be in front" rule (distNow <= 0) is what stops the exit
+        -- immediately re-firing and bouncing the player back — a confirmed
+        -- double-teleport.
+        --
+        -- But a thick (inverse-3D) portal renders its exit view through the
+        -- whole volume between its face (pos) and its back-cull plane
+        -- (pos - fwd*thickness): that volume is walkable and shows the exit,
+        -- e.g. the exterior box shell you stand inside while seeing the
+        -- interior. The mirror lands the emerging eye INSIDE that volume, so a
+        -- flat distNow <= 0 guard traps the player there and lets them walk the
+        -- full depth into the shell (the reported bug). Allow firing down to
+        -- the back-cull plane instead: walking back into the volume then
+        -- re-crosses and teleports cleanly. This still can't bounce on
+        -- emergence — the player leaves the volume moving OUT
+        -- (velocity:Dot(fwd) >= 0, already skipped above); only deliberate
+        -- backward motion reaches here. Thin portals (thickness <= 0) keep the
+        -- exact distNow <= 0 guard, so their behaviour is unchanged.
+        local thickness = portal:GetThickness()
+        local backLimit = thickness > 0 and -thickness or 0
+        if distNow <= backLimit then goto cont end
         local distNext = (nextEyeX - pos.x) * fwd.x + (nextEyeY - pos.y) * fwd.y + (nextEyeZ - pos.z) * fwd.z
-        if distNext > 0 then goto cont end
+        -- Fire when the eye reaches the plane this tick (distNext <= 0), OR
+        -- when it is already within CROSS_SKIN of the plane while moving toward
+        -- it (guaranteed by the velocity:Dot(fwd) < 0 gate above). The skin is
+        -- the slow-walk safety net: a player who creeps to a near-stop just
+        -- short of the plane and then accelerates moves further in the *next*
+        -- (accelerated) tick than distNext — computed here from this tick's
+        -- slow velocity — predicts, so the crossing slab is stepped over and
+        -- the distNow <= 0 guard then blocks it for the rest of the walk-
+        -- through. A near-stop creeper dwells several ticks within the skin and
+        -- the first accelerated tick from rest moves well under a unit, so a
+        -- small skin reliably catches it; fast movers hit distNext <= 0 first,
+        -- so their (correct, at-the-plane) timing is unchanged.
+        if distNext > 0 and distNow > CROSS_SKIN then goto cont end
 
-        -- Quad bounds check at the projected crossing point. X is portal-local
-        -- forward (already covered by the plane test); Y/Z are the face.
-        local localEye = portal:WorldToLocal(Vector(nextEyeX, nextEyeY, nextEyeZ))
+        -- Face bounds: the hull CENTRE must lie within the portal opening.
+        -- Testing the centre (not the eye) is what fixes the jump-over — when
+        -- you jump through a doorway the eye rises above the top edge but the
+        -- body's mid-point still passes through the opening, so an eye-Z test
+        -- spuriously fails while a centre-Z test passes. WorldToLocal folds in
+        -- the portal's pitch/yaw/roll, so this holds at any orientation.
+        local localCenter = portal:WorldToLocal(Vector(hullCenterX, hullCenterY, hullCenterZ))
         local mins, maxs = portal:GetCollisionBounds()
-        if localEye.y < mins.y or localEye.y > maxs.y or localEye.z < mins.z or localEye.z > maxs.z then
+        if localCenter.y < mins.y or localCenter.y > maxs.y or localCenter.z < mins.z or localCenter.z > maxs.z then
             goto cont
         end
 
