@@ -136,12 +136,19 @@ local function predictPlayerTeleport(ply, mv, cmd)
         mv:SetAngles(clampedAng)
         cmd:SetViewAngles(clampedAng)
         -- ply:SetPos resets the AbsOrigin interp cache that mv:SetOrigin
-        -- doesn't touch. Server runs it for authoritative position; client
-        -- runs it on first-time-predicted only (resim would re-snap to the
-        -- same value).
-        if SERVER or IsFirstTimePredicted() then
-            ply:SetPos(newPos)
-        end
+        -- doesn't touch, and makes ply:GetPos() report the post-teleport
+        -- position before the wp-teleport hook fires below. A consumer unstick
+        -- (Doors) reads ply:GetPos() to decide where to relocate the player, so
+        -- this has to hold on EVERY prediction pass, resim included. The
+        -- teleport mv:SetOrigin above re-runs each resim; if ply:SetPos (and the
+        -- unstick that depends on it) only ran first-time-predicted, every resim
+        -- would leave the predicted origin at the raw transform. At high ping
+        -- the crossing command stays unacked — and therefore resimulated — for
+        -- ~RTT, so that raw pos (often embedded in the exit geometry) is what the
+        -- player sits at until the server snapshot finally corrects them: the
+        -- "stuck after teleport, un-stuck once the lag catches up" bug. Re-snaps
+        -- to the same deterministic value every resim, which is harmless.
+        ply:SetPos(newPos)
         -- ply:SetEyeAngles — client-only, first-time-predicted only.
         --
         -- Why client: cmd:SetViewAngles alone leaves the persistent
@@ -197,44 +204,63 @@ local function predictPlayerTeleport(ply, mv, cmd)
                 net.WriteVector(newPos)
                 net.WriteAngle(newAng)
             net.Broadcast()
-        elseif IsFirstTimePredicted() then
-            if newAng.r ~= 0 then
-                wp.rotating = newAng.r
-            end
+        else
+            -- CLIENT (LocalPlayer). The wp-teleport hook and the mv re-sync
+            -- below run on EVERY prediction pass — first-time AND resim. A
+            -- consumer unstick (Doors) repositions the player via ply:SetPos
+            -- from inside the hook; that relocation has to be reproduced on each
+            -- resim or FinishMove reverts the predicted origin to the raw
+            -- transform. Because the crossing command is resimulated for the
+            -- whole ~RTT it stays unacked at high ping, skipping resim here is
+            -- exactly what left the player stuck at the raw pos until the server
+            -- snapshot corrected them. The unstick is a pure, deterministic
+            -- position resolver (matching the server's), so re-running it every
+            -- pass yields the identical landing — which is what prediction
+            -- requires. (Consumers' wp-teleport handlers must therefore be
+            -- idempotent and resim-safe, like all prediction-path code.)
             hook.Call("wp-teleport", GAMEMODE, portal, ply, newPos, newAng)
-            -- A wp-teleport consumer (Doors' predicted unstick) may have moved the
-            -- player via ply:SetPos during this SetupMove. Fold it back into mv so
-            -- the move keeps the adjusted origin (FinishMove would otherwise revert
-            -- it), and arm the predict window with the FINAL pos below. The arming
-            -- MUST come after this: cl_teleport.lua's getPredictDelta masks
-            -- (NetworkOrigin - GetPos) and its sanity guard compares NetOrigin
-            -- against predictedPos; the server broadcasts this same final pos, so
-            -- predictedPos must equal it or the guard mis-classifies all window.
+            -- Fold any consumer relocation (ply:SetPos in the hook) back into mv
+            -- so the move keeps the adjusted origin; FinishMove would otherwise
+            -- revert it. The reassigned newPos rides out to the predict-window
+            -- arming below so it matches the server's broadcast pos.
             local finalPos = ply:GetPos()
             if finalPos ~= newPos then
                 mv:SetOrigin(finalPos)
                 newPos = finalPos
             end
-            -- Arm the predict-lerp shift window. ply:SetPos snaps the entity
-            -- but the engine still lerps AbsOrigin from the pre-teleport
-            -- snapshot for ~RTT until a snapshot captured after the server
-            -- ran SetupMove arrives. CalcView/CalcViewModelView in
-            -- cl_teleport.lua shift the camera + viewmodel by
-            -- (NetworkOrigin - GetPos) each frame during this window so the
-            -- scene renders from where the server thinks the player is
-            -- (eye-in-renderbounds works, no blank-sky frame). Disarms on
-            -- convergence or timeout. Local playermodel is left to lerp —
-            -- SetRenderOrigin is a no-op for the local player and the model
-            -- isn't visible to ourselves in first-person anyway.
-            -- SysTime, not CurTime: CurTime inside SetupMove is the
-            -- predicted-tick time (advanced into the future), so comparing
-            -- against CurTime in CalcView yields negative ages.
-            wp.predictedPos = newPos
-            wp.predictedOldPos = origin  -- pre-teleport pos, used by getPredictDelta sanity check
-            wp.predictedAt = SysTime()
-            wp.predictArmCount = (wp.predictArmCount or 0) + 1
-            if wp.RecordTeleportEvent then
-                wp.RecordTeleportEvent(portal, origin, newPos, oldEyeAng, clampedAng, oldVel, newVel)
+            -- One-time client side effects: first-time-predicted ONLY. These arm
+            -- persistent client-frame state that must NOT re-fire on resim (every
+            -- resim runs within the same frame, so re-arming would reset the roll
+            -- fade / predict-lerp window / debug record every frame for the whole
+            -- unacked window). They read the post-unstick newPos set just above:
+            -- cl_teleport.lua's getPredictDelta sanity guard compares
+            -- NetworkOrigin against predictedPos and the server broadcasts this
+            -- same final pos, so predictedPos must equal it.
+            if IsFirstTimePredicted() then
+                if newAng.r ~= 0 then
+                    wp.rotating = newAng.r
+                end
+                -- Arm the predict-lerp shift window. ply:SetPos snaps the entity
+                -- but the engine still lerps AbsOrigin from the pre-teleport
+                -- snapshot for ~RTT until a snapshot captured after the server
+                -- ran SetupMove arrives. CalcView/CalcViewModelView in
+                -- cl_teleport.lua shift the camera + viewmodel by
+                -- (NetworkOrigin - GetPos) each frame during this window so the
+                -- scene renders from where the server thinks the player is
+                -- (eye-in-renderbounds works, no blank-sky frame). Disarms on
+                -- convergence or timeout. Local playermodel is left to lerp —
+                -- SetRenderOrigin is a no-op for the local player and the model
+                -- isn't visible to ourselves in first-person anyway.
+                -- SysTime, not CurTime: CurTime inside SetupMove is the
+                -- predicted-tick time (advanced into the future), so comparing
+                -- against CurTime in CalcView yields negative ages.
+                wp.predictedPos = newPos
+                wp.predictedOldPos = origin  -- pre-teleport pos, used by getPredictDelta sanity check
+                wp.predictedAt = SysTime()
+                wp.predictArmCount = (wp.predictArmCount or 0) + 1
+                if wp.RecordTeleportEvent then
+                    wp.RecordTeleportEvent(portal, origin, newPos, oldEyeAng, clampedAng, oldVel, newVel)
+                end
             end
         end
         do return end
