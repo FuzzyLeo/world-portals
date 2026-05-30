@@ -64,6 +64,43 @@ end
 hook.Add("CalcView", "WorldPortals_View", function(ply, pos, ang, fov)
     local delta = getPredictDelta(ply)
     local newOrigin = delta and (pos + delta) or nil
+    -- Strip the engine's stair-step view smoothing out of the eye Z.
+    --
+    -- C_BasePlayer::SmoothViewOnStairs eases the eye origin's Z whenever the
+    -- player is ON GROUND and their Z changed (so walking up stairs doesn't
+    -- snap the camera). A portal exit is a huge grounded Z change, so the engine
+    -- reads the landing as one enormous step and eases the camera over ~0.1s --
+    -- the "jump on exit" players report. The eased offset is baked into `pos`
+    -- before this hook runs.
+    --
+    -- It only bites on EXIT. SmoothViewOnStairs bails (and resets its reference)
+    -- unless the ground entity is the world, so it never fires when you land ON
+    -- an entity -- entering a Doors interior lands you on the interior prop, and
+    -- stepping out of a TARDIS lands you on its own exterior -- nor while
+    -- airborne (jumping through). An open-bottom frame that drops you onto world
+    -- brushes is the one case that triggers it.
+    --
+    -- The predict-lerp delta above cannot cancel it: delta is NetworkOrigin-vs-
+    -- GetPos, a body POSITION gap (~0 here -- the landing is authoritative-clean),
+    -- whereas this is a pure VIEW Z offset the engine adds on top of AbsOrigin.
+    -- The two are blind to each other, so it leaks straight into the camera.
+    --
+    -- EyePos() is GetPos+viewoffset with NO stair smoothing, so (pos.z -
+    -- EyePos().z) IS exactly the leaked offset -- MEASURED, not assumed, so it
+    -- self-corrects to whatever the engine applied. (The clamp magnitude is
+    -- Player:GetStepSize(), default 18 -- NOT a hardcoded constant, and the old
+    -- sv_stepsize convar no longer exists in GMod; don't reach for either.) Only
+    -- acts inside the predict window (newOrigin set), so real stair-stepping
+    -- outside a teleport keeps its smoothing. Stashed in wp.stairLeak so
+    -- CalcViewModelView can apply the IDENTICAL correction -- otherwise the
+    -- weapon keeps riding the engine's eased eye and slides down from the top of
+    -- the screen while the camera stays put.
+    if newOrigin then
+        wp.stairLeak = pos.z - ply:EyePos().z
+        newOrigin = Vector(newOrigin.x, newOrigin.y, newOrigin.z - wp.stairLeak)
+    else
+        wp.stairLeak = nil
+    end
     local newAngles
     if wp.rotating then
         if wp.rotating ~= 0 then
@@ -89,7 +126,14 @@ end)
 hook.Add("CalcViewModelView", "WorldPortals_ViewModel", function(weapon, vm, oldPos, oldAng, pos, ang)
     local delta = getPredictDelta(LocalPlayer())
     if not delta then return end
-    return pos + delta, ang
+    local origin = pos + delta
+    -- Apply the same stair-smoothing strip the CalcView hook computed this frame
+    -- (it runs first), so the weapon tracks the corrected camera instead of riding
+    -- the engine's eased eye Z and dropping in from the top of the screen.
+    if wp.stairLeak then
+        origin = Vector(origin.x, origin.y, origin.z - wp.stairLeak)
+    end
+    return origin, ang
 end)
 
 -- Predicted teleport debug HUD. Toggle with `worldportals_debug_predict 1`.
