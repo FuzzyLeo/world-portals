@@ -62,6 +62,20 @@ end
 -- View roll fade after a portal that introduced roll. wp.rotating is set
 -- locally from the predicted teleport in sh_teleport.lua (no net round-trip).
 hook.Add("CalcView", "WorldPortals_View", function(ply, pos, ang, fov)
+    -- These corrections (predict-lerp shift, stair-smoothing strip, roll fade)
+    -- are all derived from the PLAYER's own body/eye position, so they're only
+    -- valid for the player's own first-person view. When the client is
+    -- rendering from another entity -- a camera, a security monitor, in-eye
+    -- spectate -- pos/ang are that entity's, and adding the player's body delta
+    -- (or measuring stairLeak against ply:EyePos()) would corrupt it. Bail and
+    -- leave that view untouched. Use the global GetViewEntity() (the entity the
+    -- client is actually rendering from) rather than Player:GetViewEntity()
+    -- (the networked SetViewEntity value) -- the former is the current render
+    -- reality this hook is computing for.
+    if GetViewEntity() ~= ply then
+        wp.stairLeak = nil
+        return
+    end
     local delta = getPredictDelta(ply)
     local newOrigin = delta and (pos + delta) or nil
     -- Strip the engine's stair-step view smoothing out of the eye Z.
@@ -124,7 +138,12 @@ end)
 -- camera ("out of body" physgun) because viewmodel pos is computed from
 -- ply:EyePos() which still tracks the lerping AbsOrigin.
 hook.Add("CalcViewModelView", "WorldPortals_ViewModel", function(weapon, vm, oldPos, oldAng, pos, ang)
-    local delta = getPredictDelta(LocalPlayer())
+    local ply = LocalPlayer()
+    -- Same restriction as CalcView: only the player's own first-person view
+    -- (see there). When the client renders from another entity, leave the
+    -- viewmodel be. Global GetViewEntity() for the same reason as CalcView.
+    if GetViewEntity() ~= ply then return end
+    local delta = getPredictDelta(ply)
     if not delta then return end
     local origin = pos + delta
     -- Apply the same stair-smoothing strip the CalcView hook computed this frame
