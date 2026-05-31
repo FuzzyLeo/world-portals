@@ -347,6 +347,18 @@ function WorldPortals_TraceLine(data)
                 mask = data.mask,
                 filter = newFilter,
             })
+            -- Keep StartPos as the ORIGINAL requested start, not the exit-side
+            -- re-trace start. Every non-portal trace reports StartPos == the
+            -- start you asked for, and consumers rely on it: the sandbox camera
+            -- tool places the camera at trace.StartPos expecting the player's
+            -- eye, so a redirected StartPos spawned the camera inside the portal.
+            -- HitPos/Entity/Normal stay the exit-side results, so see-through
+            -- traces (line-of-sight, +use, tool HitPos placement) are unchanged
+            -- -- only StartPos is restored. (StartPos and HitPos then sit on
+            -- opposite sides of the portal, so anything deriving a ray from
+            -- HitPos - StartPos sees a portal-crossing vector; the bullet path
+            -- doesn't use this -- it rewrites Src/Dir in EntityFireBullets.)
+            tr.StartPos = trace.StartPos
             return tr
         end
     end
