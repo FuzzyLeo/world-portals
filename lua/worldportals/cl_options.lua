@@ -23,6 +23,12 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         recursion:SetTooltip("Default: 2. Higher = portals seen through portals seen through portals... up to 9 levels.")
         panel:AddItem(recursion)
 
+        local clones = vgui.Create("DCheckBoxLabel")
+        clones:SetText("Continuous entity clones")
+        clones:SetConVar("worldportals_clones")
+        clones:SetTooltip("Render props mid-teleport as two clipped halves so they look continuous across the portal instead of being cut off.")
+        panel:AddItem(clones)
+
         local debugMode = vgui.Create("DComboBox")
         debugMode:SetSortItems(false)
         debugMode:AddChoice("Off", 0)
