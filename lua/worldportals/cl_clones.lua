@@ -45,11 +45,25 @@ wp.clones = wp.clones or {}   -- [entity] = record
 
 -- Is this an entity we render clones for? Phase 1: physics props only, never a
 -- clone we made.
+--
+-- A client-NoDraw'd prop is skipped by DEFAULT (it's hidden for a reason), but a
+-- consumer can opt one back in via the wp-shouldclone hook. This covers props
+-- that are hidden only in the local realm yet remain real/drawable server-side:
+-- notably Doors' cordon SetNoDraw(true)'s every interior prop each frame while
+-- the player is OUTSIDE the interior, so they don't render loose in the world.
+-- One straddling the interior portal is exactly what we want a clone for -- the
+-- emerged half should poke out of the exterior -- so the cordon returns true
+-- here for its managed props. The client can't read the server's authoritative
+-- NoDraw (GetNoDraw returns the cordon-modified local flag), so the hider has to
+-- declare intent. (False-world models -- the other NoDraw'd things around -- are
+-- ClientsideModels, already excluded by the prop_physics class check.)
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsClone then return false end
     if ent:GetClass() ~= "prop_physics" then return false end
-    if ent:GetNoDraw() then return false end
+    if ent:GetNoDraw() then
+        return hook.Call("wp-shouldclone", GAMEMODE, ent) == true
+    end
     return true
 end
 
