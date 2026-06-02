@@ -19,16 +19,33 @@ local function predictPlayerTeleport(ply, mv, cmd)
     local origin = mv:GetOrigin()
     local frameTime = FrameTime()
 
-    -- Two reference points, used for two different jobs (see each test below):
-    --   * the EYE drives the forward crossing — firing as the eye reaches the
-    --     portal plane reproduces the previous "teleport about where the eye
-    --     is / halfway through" timing, and keeps the camera the visible-face
-    --     render offset's worth in front of the portal so it never clips
-    --     through before the teleport lands. This holds at any portal pitch/
-    --     yaw/roll because it is measured along the portal's own normal.
-    --   * the hull CENTRE drives the face bounds — a jump that lifts the eye
-    --     above the door's top edge while the body still passes through must
-    --     still count, and the eye-Z test was what wrongly rejected it.
+    -- Two reference points feed the crossing/bounds tests below:
+    --   * the EYE is the camera. It must still be IN FRONT of the portal plane
+    --     when we teleport or the back-face cull (cl_render.lua, on
+    --     portal:GetPos()) stops the stencil and the world shows through before
+    --     the teleport lands. So the eye is the anti-cull / anti-bounce front
+    --     guard (the distNow <= backLimit gate below), and one of the two points
+    --     whose plane-crossing can fire the teleport.
+    --   * the hull CENTRE drives the face bounds, and is the SECOND crossing
+    --     point. We fire when EITHER the eye or the centre reaches the plane.
+    --
+    -- Why both, not the eye alone: the eye sits a fixed ~28u straight ABOVE the
+    -- centre (purely vertical — measured), so along a portal's normal the two
+    -- differ by 28 * forward.z, i.e. only the portal's PITCH matters, never yaw:
+    --   * upright/vertical portal (forward.z ~= 0): eye and centre are at the
+    --     same depth, so "either crosses" is bit-for-bit the old eye-only test —
+    --     no change to the common wall portal at any yaw.
+    --   * ceiling / downward-pitched (forward.z < 0): the eye LEADS (going up
+    --     into the plane the highest point crosses first), so it still fires
+    --     first and the centre term never triggers earlier — also unchanged.
+    --   * floor / upward-pitched (forward.z > 0): the centre LEADS. The eye is
+    --     the highest point, so against an up-facing portal it crosses LAST — and
+    --     when you rest on whatever's under the opening (e.g. a TARDIS shell) your
+    --     feet stop before the eye ever reaches the plane, so an eye-only test
+    --     can't fire while standing and only fires deep/late on a fall. Firing on
+    --     the centre catches the body crossing mid-fall, retaining entry velocity.
+    --     This is the only case the change affects. (A dead-still rest is still
+    --     skipped by the velocity gate above; that case needs a separate path.)
     local eyePos = ply:EyePos()
     local nextEyeX = eyePos.x + velocity.x * frameTime
     local nextEyeY = eyePos.y + velocity.y * frameTime
@@ -37,6 +54,9 @@ local function predictPlayerTeleport(ply, mv, cmd)
     local hullCenterX = origin.x + (omins.x + omaxs.x) * 0.5
     local hullCenterY = origin.y + (omins.y + omaxs.y) * 0.5
     local hullCenterZ = origin.z + (omins.z + omaxs.z) * 0.5
+    local nextCenterX = hullCenterX + velocity.x * frameTime
+    local nextCenterY = hullCenterY + velocity.y * frameTime
+    local nextCenterZ = hullCenterZ + velocity.z * frameTime
 
     for _, portal in ipairs(ents.FindByClass("linked_portal_door")) do
         -- Freshly-spawned portals can appear in FindByClass before their
@@ -82,19 +102,29 @@ local function predictPlayerTeleport(ply, mv, cmd)
         local backLimit = thickness > 0 and -thickness or 0
         if distNow <= backLimit then goto cont end
         local distNext = (nextEyeX - pos.x) * fwd.x + (nextEyeY - pos.y) * fwd.y + (nextEyeZ - pos.z) * fwd.z
-        -- Fire when the eye reaches the plane this tick (distNext <= 0), OR
-        -- when it is already within CROSS_SKIN of the plane while moving toward
-        -- it (guaranteed by the velocity:Dot(fwd) < 0 gate above). The skin is
-        -- the slow-walk safety net: a player who creeps to a near-stop just
-        -- short of the plane and then accelerates moves further in the *next*
-        -- (accelerated) tick than distNext — computed here from this tick's
-        -- slow velocity — predicts, so the crossing slab is stepped over and
-        -- the distNow <= 0 guard then blocks it for the rest of the walk-
-        -- through. A near-stop creeper dwells several ticks within the skin and
-        -- the first accelerated tick from rest moves well under a unit, so a
-        -- small skin reliably catches it; fast movers hit distNext <= 0 first,
-        -- so their (correct, at-the-plane) timing is unchanged.
-        if distNext > 0 and distNow > CROSS_SKIN then goto cont end
+        -- The hull centre, swept the same way (this tick / next tick along the
+        -- portal normal). It is the SECOND crossing point — see the reference-
+        -- point note at the top of this function for why firing on either the
+        -- eye or the centre is identical to the old eye-only test on upright and
+        -- downward portals and only changes upward-facing ones.
+        local centerNow  = (hullCenterX - pos.x) * fwd.x + (hullCenterY - pos.y) * fwd.y + (hullCenterZ - pos.z) * fwd.z
+        local centerNext = (nextCenterX - pos.x) * fwd.x + (nextCenterY - pos.y) * fwd.y + (nextCenterZ - pos.z) * fwd.z
+        -- A point "reaches" the plane when it crosses this tick (...Next <= 0) OR
+        -- it is already within CROSS_SKIN of the plane while moving toward it
+        -- (guaranteed by the velocity:Dot(fwd) < 0 gate above). The skin is the
+        -- slow-walk safety net: a player who creeps to a near-stop just short of
+        -- the plane and then accelerates moves further in the *next* (accelerated)
+        -- tick than ...Next — computed here from this tick's slow velocity —
+        -- predicts, so the crossing slab is stepped over and the distNow <= 0
+        -- guard then blocks it for the rest of the walk-through. A near-stop
+        -- creeper dwells several ticks within the skin and the first accelerated
+        -- tick from rest moves well under a unit, so a small skin reliably catches
+        -- it; fast movers hit ...Next <= 0 first, so their (correct, at-the-plane)
+        -- timing is unchanged. Fire when EITHER point reaches; skip only if both
+        -- are still short of it.
+        local eyeReaches    = distNext   <= 0 or distNow   <= CROSS_SKIN
+        local centerReaches = centerNext <= 0 or centerNow <= CROSS_SKIN
+        if not (eyeReaches or centerReaches) then goto cont end
 
         -- Face bounds: the hull CENTRE must lie within the portal opening.
         -- Testing the centre (not the eye) is what fixes the jump-over — when
