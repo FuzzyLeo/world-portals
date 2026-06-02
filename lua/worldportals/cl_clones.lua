@@ -103,9 +103,32 @@ local function poseClone(rec)
     rec.clone:SetAngles(rec.angBuf)
 end
 
+-- The 12 edges of an OBB, as index pairs into the 8 corners enumerated in
+-- (sx, sy, sz) order with sz innermost (corner i below). Differ-in-one-bit
+-- neighbours: 4 x-edges, 4 y-edges, 4 z-edges.
+local OBB_EDGES = {
+    {1, 5}, {2, 6}, {3, 7}, {4, 8},  -- x
+    {1, 3}, {2, 4}, {5, 7}, {6, 8},  -- y
+    {1, 2}, {3, 4}, {5, 6}, {7, 8},  -- z
+}
+-- Reused scratch (single-threaded): the 8 OBB corners in portal-local space.
+-- Seeded with zeros so the analyzer infers number[] (not table<number, nil>).
+local sCX = {0, 0, 0, 0, 0, 0, 0, 0}
+local sCY = {0, 0, 0, 0, 0, 0, 0, 0}
+local sCZ = {0, 0, 0, 0, 0, 0, 0, 0}
+
 -- Does ent's bounds cross portal's plane, within the portal opening? Conservative
 -- (over-detects): a near-but-not-crossing prop just produces a fully-clipped
 -- (invisible) clone and a fully-drawn original, i.e. no visible change.
+--
+-- Two tests. The cheap one (OBB *center* projects inside the opening) catches the
+-- common head-on prop. The robust one clips the 12 OBB edges to the portal plane
+-- (local x = 0) and checks each crossing point's (y, z) against the opening: this
+-- catches LONG / OFF-AXIS props whose center sits far from the opening while a tip
+-- still transits the hole -- a ladder pushed in at an angle, say. The server's
+-- hull-based Touch accepts those (and arms the no-collide), but a center-only test
+-- drew no clone, so the crossed tip rendered unculled out the back of the wall and
+-- nothing showed on the exit side.
 local function straddles(ent, portal)
     local pos = portal:GetPos()
     local fwd = portal:GetForward()
@@ -113,13 +136,49 @@ local function straddles(ent, portal)
     local d = fwd.x * (center.x - pos.x) + fwd.y * (center.y - pos.y) + fwd.z * (center.z - pos.z)
     if math.abs(d) >= ent:BoundingRadius() then return false end
 
-    local lc = portal:WorldToLocal(center)
     local mins, maxs = portal:GetCollisionBounds()
-    if lc.y < mins.y - OPENING_SLACK or lc.y > maxs.y + OPENING_SLACK
-        or lc.z < mins.z - OPENING_SLACK or lc.z > maxs.z + OPENING_SLACK then
-        return false
+    local y0, y1 = mins.y - OPENING_SLACK, maxs.y + OPENING_SLACK
+    local z0, z1 = mins.z - OPENING_SLACK, maxs.z + OPENING_SLACK
+
+    -- Fast path: the OBB centre projects inside the opening.
+    local lc = portal:WorldToLocal(center)
+    if lc.y >= y0 and lc.y <= y1 and lc.z >= z0 and lc.z <= z1 then
+        return true
     end
-    return true
+
+    -- Robust path: clip the OBB's edges to the portal plane and test the
+    -- crossing points against the opening.
+    local rpos, rang = renderTransform(ent)
+    local mn, mx = ent:OBBMins(), ent:OBBMaxs()
+    local i = 0
+    for sx = 0, 1 do
+        local lx = sx == 0 and mn.x or mx.x
+        for sy = 0, 1 do
+            local ly = sy == 0 and mn.y or mx.y
+            for sz = 0, 1 do
+                local lz = sz == 0 and mn.z or mx.z
+                i = i + 1
+                local l = portal:WorldToLocal(LocalToWorld(Vector(lx, ly, lz), ANGLE_ZERO, rpos, rang))
+                sCX[i], sCY[i], sCZ[i] = l.x, l.y, l.z
+            end
+        end
+    end
+    for _, edge in ipairs(OBB_EDGES) do
+        local a, b = edge[1], edge[2]
+        local ax = sCX[a] --[[@as number]]
+        local bx = sCX[b] --[[@as number]]
+        if (ax < 0) ~= (bx < 0) then
+            local t = ax / (ax - bx)
+            local py = sCY[a] + t * (sCY[b] - sCY[a])
+            if py >= y0 and py <= y1 then
+                local pz = sCZ[a] + t * (sCZ[b] - sCZ[a])
+                if pz >= z0 and pz <= z1 then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 -- Fill rec.entryNrm/entryD (keep the +entry_forward half) and rec.exitNrm/exitD
