@@ -93,6 +93,12 @@ local function isCandidate(ent)
     if ent == LocalPlayer() and not cvGhostsSelf:GetBool() then
         return false
     end
+    -- A dead player isn't transiting a portal (the SetupMove teleport skips the
+    -- dead) and its model isn't the body you see -- the death ragdoll is. Yet the
+    -- dead player entity lingers at the death spot still running its move anim, so
+    -- ghosting it renders a phantom (e.g. a pair of walking legs) over the corpse.
+    -- Skip dead players; the death ragdoll itself still ghosts as a normal ragdoll.
+    if ent:IsPlayer() and not ent:Alive() then return false end
     -- prop_physics (rigid) or a skeletal entity: a ragdoll (prop_ragdoll, NPC
     -- corpses), a live NPC, or a player -- INCLUDING the local player. The ghost
     -- completes the local player's clipped body into a whole one wherever the body
