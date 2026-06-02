@@ -195,6 +195,26 @@ net.Receive("WorldPortals_Teleport", function()
         -- don't double-fire the hook or yank the predicted position.
         if ent == LocalPlayer() then
             if wp.RecordNetTeleport then wp.RecordNetTeleport(new_pos) end
+            -- Singleplayer runs no client-side prediction, so sh_teleport.lua's
+            -- prediction branch never ran for us at all: it never armed our roll
+            -- fade / stair-strip window, and never fired the CLIENT-realm
+            -- wp-teleport hook. Drive both from the authoritative broadcast
+            -- instead. The client-side wp-teleport is what re-points the local
+            -- player's OWN ghost pair the instant it crosses (cl_ghosts.lua's
+            -- WorldPortals_GhostsTeleport) -- without it the ghost lags a frame
+            -- behind the crossing and flickers a half body. The server already
+            -- fired wp-teleport for its authoritative unstick; this is just the
+            -- client-realm fire the predicted path normally provides, and
+            -- consumers are idempotent so a single fire is safe.
+            --
+            -- On a listen server this message also reaches us, but the
+            -- prediction branch already did all of this ~RTT ago -- re-arming
+            -- the fade mid-decay and double-firing the hook -- so gate on
+            -- SinglePlayer().
+            if game.SinglePlayer() then
+                if wp.ArmTeleportView then wp.ArmTeleportView(new_angle) end
+                hook.Call("wp-teleport", GAMEMODE, portal, ent, new_pos, new_angle)
+            end
             return
         end
         ent:SetPos( new_pos )

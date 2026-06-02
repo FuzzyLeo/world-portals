@@ -193,15 +193,26 @@ local function predictPlayerTeleport(ply, mv, cmd)
         -- survives resim, so calling it during resim clobbers mouse delta the
         -- user has accumulated since (camera "snaps back" mid-look).
         --
-        -- Why NOT on the server: a server write makes m_angEyeAngles
-        -- authoritative, and the snapshot pushes it back to the owning client
-        -- ~RTT later, overriding any mouse the user moved during that window —
-        -- a confirmed, reproducible snap-back of in-flight look input. We tried
-        -- a server-side write to kill a suspected angle-rollback; the rollback
-        -- did not reproduce in clean testing (the client rotation propagates
-        -- via cmds as above), and the write's snap-back was strictly worse.
-        -- See memory/reference_predict_angle_contamination.md.
-        if CLIENT and IsFirstTimePredicted() then
+        -- Why NOT on the server (in multiplayer): a server write makes
+        -- m_angEyeAngles authoritative, and the snapshot pushes it back to the
+        -- owning client ~RTT later, overriding any mouse the user moved during
+        -- that window — a confirmed, reproducible snap-back of in-flight look
+        -- input. We tried a server-side write to kill a suspected angle-
+        -- rollback; the rollback did not reproduce in clean testing (the client
+        -- rotation propagates via cmds as above), and the write's snap-back was
+        -- strictly worse. See memory/reference_predict_angle_contamination.md.
+        --
+        -- SINGLEPLAYER EXCEPTION: in singleplayer the engine runs no client-
+        -- side prediction — SetupMove/Move/FinishMove fire on the SERVER realm
+        -- only, so this whole function never executes on the client and the
+        -- CLIENT-gated SetEyeAngles never lands, leaving the view un-rotated on
+        -- entry (the position teleport still works because that's server-side).
+        -- The snap-back reason above doesn't apply in SP: there's no
+        -- prediction, no RTT, no snapshot-override window — server and client
+        -- are synchronous, so the server write IS the correct (and only) way to
+        -- rotate the view. game.SinglePlayer() is false on a listen server, so
+        -- the multiplayer path is untouched.
+        if (CLIENT and IsFirstTimePredicted()) or (SERVER and game.SinglePlayer()) then
             ply:SetEyeAngles(clampedAng)
         end
 
@@ -267,9 +278,12 @@ local function predictPlayerTeleport(ply, mv, cmd)
             -- NetworkOrigin against predictedPos and the server broadcasts this
             -- same final pos, so predictedPos must equal it.
             if IsFirstTimePredicted() then
-                if newAng.r ~= 0 then
-                    wp.rotating = newAng.r
-                end
+                -- Roll fade-in + stair-smoothing strip window. Shared with the
+                -- singleplayer path (cl_init.lua's WorldPortals_Teleport net
+                -- handler) via this helper so both realms arm identical client-
+                -- frame corrections. The predict-lerp window below is armed
+                -- separately because it's prediction/ping-only (unneeded in SP).
+                if wp.ArmTeleportView then wp.ArmTeleportView(newAng) end
                 -- Arm the predict-lerp shift window. ply:SetPos snaps the entity
                 -- but the engine still lerps AbsOrigin from the pre-teleport
                 -- snapshot for ~RTT until a snapshot captured after the server

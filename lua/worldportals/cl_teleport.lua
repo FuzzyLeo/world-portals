@@ -30,9 +30,30 @@
 -- comparing against a real-time CurTime() in CalcView yields negative ages.
 local PREDICT_TIMEOUT = 0.5
 
+-- Window during which we strip the engine's post-teleport stair smoothing (see
+-- CalcView). Self-measuring -- stairLeak falls to 0 once the engine finishes
+-- easing -- so a generous timeout is harmless; matched to PREDICT_TIMEOUT.
+local STAIR_STRIP_TIMEOUT = 0.5
+
 -- Stats so we can verify the arm/disarm branch fires at all from the HUD.
 wp.predictArmCount = wp.predictArmCount or 0
 wp.predictDisarmReasons = wp.predictDisarmReasons or {timeout=0, sanityFail=0}
+
+-- Arm the post-teleport client-frame view corrections for a LOCAL teleport: the
+-- roll fade-in (wp.rotating) and the stair-smoothing strip window
+-- (wp.stairStripAt). On a listen server the client predicts its own teleport
+-- and calls this from sh_teleport.lua's prediction branch; in singleplayer the
+-- client runs NO prediction (SetupMove is server-only), so cl_init.lua's
+-- WorldPortals_Teleport net handler calls it from the authoritative broadcast
+-- instead. Deliberately does NOT arm the predict-lerp shift (wp.predictedPos):
+-- that masks snapshot-interp drift which only exists under prediction/ping -- in
+-- SP GetPos is already authoritative, so there is nothing to mask.
+function wp.ArmTeleportView(newAng)
+    if newAng.r ~= 0 then
+        wp.rotating = newAng.r
+    end
+    wp.stairStripAt = SysTime()
+end
 
 local function getPredictDelta(ply)
     if not wp.predictedPos then return end
@@ -103,15 +124,23 @@ hook.Add("CalcView", "WorldPortals_View", function(ply, pos, ang, fov)
     -- EyePos().z) IS exactly the leaked offset -- MEASURED, not assumed, so it
     -- self-corrects to whatever the engine applied. (The clamp magnitude is
     -- Player:GetStepSize(), default 18 -- NOT a hardcoded constant, and the old
-    -- sv_stepsize convar no longer exists in GMod; don't reach for either.) Only
-    -- acts inside the predict window (newOrigin set), so real stair-stepping
-    -- outside a teleport keeps its smoothing. Stashed in wp.stairLeak so
-    -- CalcViewModelView can apply the IDENTICAL correction -- otherwise the
-    -- weapon keeps riding the engine's eased eye and slides down from the top of
-    -- the screen while the camera stays put.
-    if newOrigin then
+    -- sv_stepsize convar no longer exists in GMod; don't reach for either.)
+    -- Stashed in wp.stairLeak so CalcViewModelView can apply the IDENTICAL
+    -- correction -- otherwise the weapon keeps riding the engine's eased eye and
+    -- slides down from the top of the screen while the camera stays put.
+    --
+    -- Gated on its OWN post-teleport window (wp.stairStripAt), NOT the predict-
+    -- lerp shift above: the shift only exists under prediction/ping and is nil
+    -- in singleplayer, but stair smoothing fires on every grounded portal exit
+    -- in BOTH realms. The window is armed by wp.ArmTeleportView (listen-server
+    -- prediction branch + the SP net handler), so real stair-stepping outside a
+    -- teleport keeps its smoothing. Layers onto the predict shift when present
+    -- (base = newOrigin), onto the raw view origin when not (base = pos, the SP
+    -- case).
+    if wp.stairStripAt and SysTime() - wp.stairStripAt < STAIR_STRIP_TIMEOUT then
+        local base = newOrigin or pos
         wp.stairLeak = pos.z - ply:EyePos().z
-        newOrigin = Vector(newOrigin.x, newOrigin.y, newOrigin.z - wp.stairLeak)
+        newOrigin = Vector(base.x, base.y, base.z - wp.stairLeak)
     else
         wp.stairLeak = nil
     end
@@ -144,11 +173,15 @@ hook.Add("CalcViewModelView", "WorldPortals_ViewModel", function(weapon, vm, old
     -- viewmodel be. Global GetViewEntity() for the same reason as CalcView.
     if GetViewEntity() ~= ply then return end
     local delta = getPredictDelta(ply)
-    if not delta then return end
-    local origin = pos + delta
-    -- Apply the same stair-smoothing strip the CalcView hook computed this frame
-    -- (it runs first), so the weapon tracks the corrected camera instead of riding
-    -- the engine's eased eye Z and dropping in from the top of the screen.
+    -- Two independent corrections, mirroring CalcView: the predict-lerp shift
+    -- (listen server only -- always nil in SP) and the stair-smoothing strip
+    -- (BOTH realms, stashed in wp.stairLeak by CalcView, which runs first this
+    -- frame). Bail only when NEITHER applies. Previously this returned early on
+    -- a nil delta, so in singleplayer -- where delta is always nil -- the stair
+    -- strip never reached the viewmodel and the weapon rode the engine's eased
+    -- eye Z, sliding down from the top of the screen on a grounded portal exit.
+    if not delta and not wp.stairLeak then return end
+    local origin = delta and (pos + delta) or pos
     if wp.stairLeak then
         origin = Vector(origin.x, origin.y, origin.z - wp.stairLeak)
     end
