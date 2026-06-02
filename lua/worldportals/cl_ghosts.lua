@@ -1,4 +1,4 @@
--- Continuous entity rendering across portals ("portal clones").
+-- Continuous entity rendering across portals ("portal ghosts").
 --
 -- An entity physically straddles a portal's plane for a short window before the
 -- teleport fires (props: server ENT:Touch; players: predicted SetupMove). The
@@ -10,7 +10,7 @@
 --   * the REAL entity, clipped to keep only the +entry_forward half (the part
 --     that has NOT crossed yet) -- via a RenderOverride that pushes an
 --     entry-plane clip.
---   * a clientside CLONE at the mirror-transformed exit pose, clipped to keep
+--   * a clientside GHOST at the mirror-transformed exit pose, clipped to keep
 --     only the +exit_forward half (the EMERGED part) -- a ClientsideModel the
 --     engine auto-draws in every view (main scene AND each portal RT), with its
 --     own RenderOverride pushing an exit-plane clip.
@@ -24,23 +24,26 @@
 -- teleport logic: straddling is detected each frame by a geometry test, not by
 -- when the teleport fires.
 --
--- Phase 1: physics props (rigid -- a single SetPos/SetAngles poses the clone).
+-- Phase 1: physics props (rigid -- a single SetPos/SetAngles poses the ghost).
 -- Phase 2: skeletal entities -- ragdolls (physics-driven skeleton) and NPCs
 -- (animated, sequence-driven skeleton). Their visible shape is the posed
 -- skeleton, not a rigid transform, so a plain ClientsideModel of the model would
--- draw in its reference (T-)pose. We drive the clone bone-by-bone instead: each
+-- draw in its reference (T-)pose. We drive the ghost bone-by-bone instead: each
 -- frame we read the real entity's world bone matrices and re-emit them through
--- the portal transform onto the clone (see copyBonesThroughPortal). A held weapon
+-- the portal transform onto the ghost (see copyBonesThroughPortal). A held weapon
 -- is a separate entity bone-merged onto the hands, so it's mirrored as a second
--- sub-clone (see updateWeapon / makeWeaponCloneOverride). Players (animated body +
--- weapon + the local-player viewmodel/hands wrinkle) are a later phase -- same
--- bone-copy path, they just need their own candidate/straddle handling.
+-- sub-ghost (see updateWeapon / makeWeaponGhostOverride). This covers props,
+-- ragdolls, NPCs and players -- including the LOCAL player, whose ghost is their
+-- emerged half at the exit, so the body reads as whole during transit. The local
+-- player's ghost is suppressed only in the single view looking straight through
+-- the portal they're transiting (see localGhostIsCutaway), where the camera sits
+-- inside the ghost and it would be an in-your-face cutaway "ghost".
 
 local ENABLE_DEFAULT = "1"
-CreateClientConVar("worldportals_clones", ENABLE_DEFAULT, true, false,
-    "World Portals - render continuous clipped clones of entities straddling a portal", 0, 1)
+CreateClientConVar("worldportals_ghosts", ENABLE_DEFAULT, true, false,
+    "World Portals - render continuous clipped ghosts of entities straddling a portal", 0, 1)
 
-local CLONE_GRACE   = 0.1   -- seconds to keep a clone alive after the straddle test drops out (anti-flicker)
+local GHOST_GRACE   = 0.1   -- seconds to keep a ghost alive after the straddle test drops out (anti-flicker)
 local OPENING_SLACK = 8     -- units of slack on the portal opening (width/height) test
 local FIND_MARGIN   = 256   -- extra radius around the portal for the candidate FindInSphere
 -- The portal's VISIBLE face sits 5 units in front (-forward) of portal:GetPos()
@@ -51,17 +54,17 @@ local FIND_MARGIN   = 256   -- extra radius around the portal for the candidate 
 -- so the seam is placed on the visible face instead.
 local FACE_OFFSET   = 5
 
-wp.clones = wp.clones or {}   -- [entity] = record
+wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
--- Is this an entity we render clones for? Physics props (rigid) and ragdolls
--- (skeletal -- posed via per-bone matrix copy), never a clone we made.
+-- Is this an entity we render ghosts for? Physics props (rigid) and ragdolls
+-- (skeletal -- posed via per-bone matrix copy), never a ghost we made.
 --
 -- A client-NoDraw'd prop is skipped by DEFAULT (it's hidden for a reason), but a
--- consumer can opt one back in via the wp-shouldclone hook. This covers props
+-- consumer can opt one back in via the wp-shouldghost hook. This covers props
 -- that are hidden only in the local realm yet remain real/drawable server-side:
 -- notably Doors' cordon SetNoDraw(true)'s every interior prop each frame while
 -- the player is OUTSIDE the interior, so they don't render loose in the world.
--- One straddling the interior portal is exactly what we want a clone for -- the
+-- One straddling the interior portal is exactly what we want a ghost for -- the
 -- emerged half should poke out of the exterior -- so the cordon returns true
 -- here for its managed props. The client can't read the server's authoritative
 -- NoDraw (GetNoDraw returns the cordon-modified local flag), so the hider has to
@@ -69,14 +72,19 @@ wp.clones = wp.clones or {}   -- [entity] = record
 -- ClientsideModels, already excluded by the prop_physics class check.)
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
-    if ent.WPIsClone then return false end
+    if ent.WPIsGhost then return false end
     -- prop_physics (rigid) or a skeletal entity: a ragdoll (prop_ragdoll, NPC
-    -- corpses) or a live NPC (animated). IsRagdoll()/IsNPC() also cleanly exclude
-    -- our own clones -- a clone is a plain ClientsideModel, neither ragdoll nor
-    -- NPC, and is flagged WPIsClone above regardless.
-    if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll() and not ent:IsNPC() then return false end
+    -- corpses), a live NPC, or a player -- INCLUDING the local player. The ghost
+    -- completes the local player's clipped body into a whole one wherever the body
+    -- is drawn (third-person, external cameras, portal views); it's suppressed only
+    -- in the plain first-person view by the ghost overrides themselves (where the
+    -- real body isn't drawn, so a lone ghost half would float as a "ghost"). These
+    -- predicates also cleanly exclude our own ghosts -- a ghost is a plain
+    -- ClientsideModel, none of the above, and is flagged WPIsGhost above regardless.
+    if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll()
+        and not ent:IsNPC() and not ent:IsPlayer() then return false end
     if ent:GetNoDraw() then
-        return hook.Call("wp-shouldclone", GAMEMODE, ent) == true
+        return hook.Call("wp-shouldghost", GAMEMODE, ent) == true
     end
     return true
 end
@@ -90,7 +98,7 @@ end
 local ANGLE_ZERO = Angle()
 
 -- The transform the original is actually RENDERED at -- the single source of
--- truth for gluing the clone (and the entry clip) to the visible prop. While
+-- truth for gluing the ghost (and the entry clip) to the visible prop. While
 -- cl_init.lua's rapid-loop render-follow is active it SetRenderOrigin/Angles's the
 -- prop to its networked transform (GetPos is frozen ~cl_interp behind and only
 -- jumps on each wrap during a loop), so GetRenderOrigin/Angles returns that;
@@ -108,13 +116,13 @@ local function renderCenter(ent)
     return LocalToWorld(ent:OBBCenter(), ANGLE_ZERO, rpos, rang)
 end
 
--- Mirror the original's current render transform through the pair onto the clone.
-local function poseClone(rec)
+-- Mirror the original's current render transform through the pair onto the ghost.
+local function poseGhost(rec)
     local rpos, rang = renderTransform(rec.ent)
     wp.TransformPortalPosInto(rec.posBuf, rpos, rec.portal, rec.exit)
     wp.TransformPortalAngleInto(rec.angBuf, rang, rec.portal, rec.exit)
-    rec.clone:SetPos(rec.posBuf)
-    rec.clone:SetAngles(rec.angBuf)
+    rec.ghost:SetPos(rec.posBuf)
+    rec.ghost:SetAngles(rec.angBuf)
 end
 
 -- The 12 edges of an OBB, as index pairs into the 8 corners enumerated in
@@ -133,7 +141,7 @@ local sCZ = {0, 0, 0, 0, 0, 0, 0, 0}
 
 -- Does ent's bounds cross portal's plane, within the portal opening? Conservative
 -- (over-detects): a near-but-not-crossing prop just produces a fully-clipped
--- (invisible) clone and a fully-drawn original, i.e. no visible change.
+-- (invisible) ghost and a fully-drawn original, i.e. no visible change.
 --
 -- Two tests. The cheap one (OBB *center* projects inside the opening) catches the
 -- common head-on prop. The robust one clips the 12 OBB edges to the portal plane
@@ -141,7 +149,7 @@ local sCZ = {0, 0, 0, 0, 0, 0, 0, 0}
 -- catches LONG / OFF-AXIS props whose center sits far from the opening while a tip
 -- still transits the hole -- a ladder pushed in at an angle, say. The server's
 -- hull-based Touch accepts those (and arms the no-collide), but a center-only test
--- drew no clone, so the crossed tip rendered unculled out the back of the wall and
+-- drew no ghost, so the crossed tip rendered unculled out the back of the wall and
 -- nothing showed on the exit side.
 local function straddles(ent, portal)
     local pos = portal:GetPos()
@@ -240,35 +248,35 @@ local function updatePlanes(rec)
               + xfwd.z * (xpos.z - xfwd.z * xoff)
 end
 
--- Mirror the original's visual customizations onto the clone. Entity-state
+-- Mirror the original's visual customizations onto the ghost. Entity-state
 -- fields (model/skin/bodygroups/scale/materials) are diffed against a cached
 -- signature and only re-applied on change; colour/alpha is applied at draw time
 -- (render.SetColorModulation/SetBlend) where it reliably affects DrawModel.
 local function syncAppearance(rec)
-    local ent, clone, sig = rec.ent, rec.clone, rec.sig
+    local ent, ghost, sig = rec.ent, rec.ghost, rec.sig
 
     local model = ent:GetModel()
-    if sig.model ~= model then clone:SetModel(model); sig.model = model end
+    if sig.model ~= model then ghost:SetModel(model); sig.model = model end
 
     local skin = ent:GetSkin()
-    if sig.skin ~= skin then clone:SetSkin(skin); sig.skin = skin end
+    if sig.skin ~= skin then ghost:SetSkin(skin); sig.skin = skin end
 
     for i = 0, ent:GetNumBodyGroups() - 1 do
         local v = ent:GetBodygroup(i)
-        if sig["bg" .. i] ~= v then clone:SetBodygroup(i, v); sig["bg" .. i] = v end
+        if sig["bg" .. i] ~= v then ghost:SetBodygroup(i, v); sig["bg" .. i] = v end
     end
 
     local scale = ent:GetModelScale()
-    if sig.scale ~= scale then clone:SetModelScale(scale); sig.scale = scale end
+    if sig.scale ~= scale then ghost:SetModelScale(scale); sig.scale = scale end
 
     local mat = ent:GetMaterial()
-    if sig.mat ~= mat then clone:SetMaterial(mat); sig.mat = mat end
+    if sig.mat ~= mat then ghost:SetMaterial(mat); sig.mat = mat end
 
     local mats = ent:GetMaterials()
     if mats then
         for i = 1, #mats do
             local sub = ent:GetSubMaterial(i - 1)
-            if sig["sm" .. i] ~= sub then clone:SetSubMaterial(i - 1, sub); sig["sm" .. i] = sub end
+            if sig["sm" .. i] ~= sub then ghost:SetSubMaterial(i - 1, sub); sig["sm" .. i] = sub end
         end
     end
 end
@@ -293,8 +301,8 @@ local function makeOriginalOverride(rec)
     end
 end
 
--- Drive a skeletal clone's pose from the real entity's live skeleton, mirrored
--- through the portal. The clone is a plain ClientsideModel (no physics, no anim),
+-- Drive a skeletal ghost's pose from the real entity's live skeleton, mirrored
+-- through the portal. The ghost is a plain ClientsideModel (no physics, no anim),
 -- so its bones sit in the reference pose until we override them: each frame we
 -- read the source's world bone matrices (SetupBones refreshes them to the current
 -- pose -- physics-driven for a ragdoll, animation-driven for an NPC) and re-emit
@@ -302,14 +310,14 @@ end
 -- TransformPortalPos on the bone origin,
 -- TransformPortalAngle on its orientation, scale carried across. Because that
 -- transform is a proper rotation+translation, transforming origin and orientation
--- independently is exact, so the clone's exit-half tiles the original's entry-half
+-- independently is exact, so the ghost's exit-half tiles the original's entry-half
 -- seamlessly bone-for-bone. Done inside the RenderOverride (draw time) because
 -- SetBoneMatrix overrides are consumed by the next DrawModel and would otherwise
--- be clobbered by the engine's own SetupBones for the clone.
-local function copyBonesThroughPortal(rec, src, clone)
+-- be clobbered by the engine's own SetupBones for the ghost.
+local function copyBonesThroughPortal(rec, src, ghost)
     src:SetupBones()
-    clone:SetupBones()
-    local n = clone:GetBoneCount()
+    ghost:SetupBones()
+    local n = ghost:GetBoneCount()
     if not n or n <= 0 then return end
     for i = 0, n - 1 do
         local m = src:GetBoneMatrix(i)
@@ -320,15 +328,35 @@ local function copyBonesThroughPortal(rec, src, clone)
             bm:SetTranslation(rec.bonePosBuf)
             bm:SetAngles(rec.boneAngBuf)
             bm:SetScale(m:GetScale())
-            clone:SetBoneMatrix(i, bm)
+            ghost:SetBoneMatrix(i, bm)
         end
     end
 end
 
-local function makeCloneOverride(rec)
+-- The ghost is the EXIT half of the local player's body, drawn at the exit. We
+-- want it visible everywhere it reads as a real emerged half -- third-person,
+-- external cameras, the exit portal seen from afar, recursive portal depths -- so
+-- the body looks whole during a transit. The ONE view it MUST be hidden in is the
+-- one looking straight through the portal you're transiting: there the render
+-- camera sits exactly at the transformed eye, i.e. right inside the ghost, so you'd
+-- see the inside of your own model as an in-your-face cutaway "ghost". Detect that
+-- precisely -- the current render origin (EyePos, = the portal cam) coincides with
+-- where this pair maps your real eye. At any other camera (third-person, external,
+-- or a deeper recursion whose camera is multiply-transformed and far from the
+-- ghost) the distance is large, so the ghost shows. Never hides for other entities.
+local CUTAWAY_DIST_SQR = 64 * 64
+local function localGhostIsCutaway(rec)
+    if rec.ent ~= LocalPlayer() then return false end
+    if not wp.drawing then return false end
+    local camAtExit = wp.TransformPortalPos(LocalPlayer():EyePos(), rec.portal, rec.exit)
+    return EyePos():DistToSqr(camAtExit) < CUTAWAY_DIST_SQR
+end
+
+local function makeGhostOverride(rec)
     return function(self, flags)
         local ent = rec.ent
         if not IsValid(ent) then return end
+        if localGhostIsCutaway(rec) then return end
         if rec.skeletal then copyBonesThroughPortal(rec, ent, self) end
         local c = ent:GetColor()
         local oldBlend = render.GetBlend()
@@ -345,8 +373,8 @@ local function makeCloneOverride(rec)
 end
 
 -- An NPC's (or player's) active weapon is a SEPARATE entity bone-merged onto the
--- hands, so it isn't part of the body's skeleton and the body clone above never
--- draws it. We mirror it as a second sub-clone, handled symmetrically to the
+-- hands, so it isn't part of the body's skeleton and the body ghost above never
+-- draws it. We mirror it as a second sub-ghost, handled symmetrically to the
 -- body: the real weapon gets an entry-plane clip (so its muzzle doesn't poke
 -- unclipped through the portal on the near side, the same artefact the body clip
 -- fixes), and a weapon ClientsideModel at the exit gets the exit-plane clip. The
@@ -354,10 +382,11 @@ end
 -- copyBonesThroughPortal reproduces the held pose exactly (verified: a weapon's
 -- GetBoneMatrix(0) == its GetPos, tracking the hand).
 
-local function makeWeaponCloneOverride(rec)
+local function makeWeaponGhostOverride(rec)
     return function(self, flags)
         local w = rec.weapon
         if not IsValid(w) then return end
+        if localGhostIsCutaway(rec) then return end
         copyBonesThroughPortal(rec, w, self)
         local c = w:GetColor()
         local oldBlend = render.GetBlend()
@@ -388,10 +417,10 @@ local function makeWeaponOriginalOverride(rec)
 end
 
 -- Tear down weapon tracking: restore the real weapon's RenderOverride and remove
--- the weapon clone. Safe to call when no weapon is tracked.
+-- the weapon ghost. Safe to call when no weapon is tracked.
 local function clearWeapon(rec)
-    if IsValid(rec.weaponClone) then rec.weaponClone:Remove() end
-    rec.weaponClone = nil
+    if IsValid(rec.weaponGhost) then rec.weaponGhost:Remove() end
+    rec.weaponGhost = nil
     if IsValid(rec.weapon) and rec.weapon.RenderOverride == rec.weaponOriginalOverride then
         rec.weapon.RenderOverride = rec.weaponSavedOverride
     end
@@ -400,9 +429,9 @@ local function clearWeapon(rec)
     rec.weaponSavedOverride = nil
 end
 
--- Keep the weapon sub-clone in step with the NPC/player's current active weapon.
--- Lazily (re)builds the weapon clone when the held model changes, installs the
--- entry clip on the real weapon, and parks the clone root at the transformed
+-- Keep the weapon sub-ghost in step with the NPC/player's current active weapon.
+-- Lazily (re)builds the weapon ghost when the held model changes, installs the
+-- entry clip on the real weapon, and parks the ghost root at the transformed
 -- weapon pose for culling (its bones are placed in world space by the override).
 local function updateWeapon(rec)
     local ent = rec.ent
@@ -419,11 +448,11 @@ local function updateWeapon(rec)
         clearWeapon(rec)
         local wc = ClientsideModel(model, RENDERGROUP_OPAQUE)
         if not IsValid(wc) then return end
-        wc.WPIsClone = true
+        wc.WPIsGhost = true
         wc:SetNoDraw(false)
         wc:DrawShadow(false)
-        wc.RenderOverride = makeWeaponCloneOverride(rec)
-        rec.weaponClone = wc
+        wc.RenderOverride = makeWeaponGhostOverride(rec)
+        rec.weaponGhost = wc
         rec.weaponModel = model
         rec.weaponOriginalOverride = rec.weaponOriginalOverride or makeWeaponOriginalOverride(rec)
     end
@@ -434,12 +463,12 @@ local function updateWeapon(rec)
         w.RenderOverride = rec.weaponOriginalOverride
     end
 
-    if IsValid(rec.weaponClone) then
+    if IsValid(rec.weaponGhost) then
         wp.TransformPortalPosInto(rec.posBuf, w:GetPos(), rec.portal, rec.exit)
         wp.TransformPortalAngleInto(rec.angBuf, w:GetAngles(), rec.portal, rec.exit)
-        rec.weaponClone:SetPos(rec.posBuf)
-        rec.weaponClone:SetAngles(rec.angBuf)
-        rec.weaponClone:SetSkin(w:GetSkin())
+        rec.weaponGhost:SetPos(rec.posBuf)
+        rec.weaponGhost:SetAngles(rec.angBuf)
+        rec.weaponGhost:SetSkin(w:GetSkin())
     end
 end
 
@@ -454,34 +483,45 @@ local function ensureOriginalOverride(rec)
 end
 
 local function endStraddle(rec)
-    if IsValid(rec.clone) then rec.clone:Remove() end
+    if IsValid(rec.ghost) then rec.ghost:Remove() end
     if IsValid(rec.ent) and rec.ent.RenderOverride == rec.originalOverride then
         rec.ent.RenderOverride = rec.savedRenderOverride
     end
     clearWeapon(rec)
-    wp.clones[rec.ent] = nil
+    wp.ghosts[rec.ent] = nil
 end
 
 local function startStraddle(ent, portal)
     local exit = portal:GetExit()
     if not IsValid(exit) then return nil end
 
-    local clone = ClientsideModel(ent:GetModel(),
+    local ghost = ClientsideModel(ent:GetModel(),
         isTranslucent(ent) and RENDERGROUP_TRANSLUCENT or RENDERGROUP_OPAQUE)
-    if not IsValid(clone) then return nil end
+    if not IsValid(ghost) then return nil end
 
-    clone.WPIsClone = true
-    clone:SetNoDraw(false)
-    clone:DrawShadow(false)
+    ghost.WPIsGhost = true
+    ghost:SetNoDraw(false)
+    ghost:DrawShadow(false)
+
+    -- A player model's PlayerColor material proxy reads ent:GetPlayerColor(), which
+    -- a plain ClientsideModel can't carry -- SetPlayerColor ERRORS on one. Override
+    -- the method on the ghost instead, so the proxy returns the source player's live
+    -- colour and tints exactly the clothing materials the real body does (verified:
+    -- the proxy invokes this Lua method; whole-model SetColorModulation would wrongly
+    -- tint skin too). Players only -- props/ragdolls/NPCs have no player colour, and
+    -- a held physgun's world model already carries its weapon colour on its own.
+    if ent:IsPlayer() then
+        ghost.GetPlayerColor = function() return ent:GetPlayerColor() end
+    end
 
     local rec = {
         ent = ent,
         portal = portal,
         exit = exit,
-        clone = clone,
-        -- A ragdoll or NPC is skeletal: the clone's pose comes from per-bone matrix
-        -- copy (copyBonesThroughPortal) rather than the rigid root SetPos/SetAngles.
-        skeletal = ent:IsRagdoll() or ent:IsNPC(),
+        ghost = ghost,
+        -- A ragdoll, NPC or player is skeletal: the ghost's pose comes from per-bone
+        -- matrix copy (copyBonesThroughPortal) rather than the rigid SetPos/SetAngles.
+        skeletal = ent:IsRagdoll() or ent:IsNPC() or ent:IsPlayer(),
         translucent = isTranslucent(ent),
         lastSeen = SysTime(),
         posBuf = Vector(),
@@ -497,8 +537,8 @@ local function startStraddle(ent, portal)
         sig = {},
     }
     rec.originalOverride = makeOriginalOverride(rec)
-    clone.RenderOverride = makeCloneOverride(rec)
-    wp.clones[ent] = rec
+    ghost.RenderOverride = makeGhostOverride(rec)
+    wp.ghosts[ent] = rec
     return rec
 end
 
@@ -510,12 +550,12 @@ local function updateStraddle(rec, now)
     if not IsValid(exit) then return false end
     rec.exit = exit
 
-    -- A change in translucency flips which render pass the clone belongs to,
+    -- A change in translucency flips which render pass the ghost belongs to,
     -- which is baked in at ClientsideModel creation -- rebuild on change.
     if isTranslucent(rec.ent) ~= rec.translucent then return false end
 
     updatePlanes(rec)
-    poseClone(rec)
+    poseGhost(rec)
     syncAppearance(rec)
     ensureOriginalOverride(rec)
     updateWeapon(rec)
@@ -526,16 +566,16 @@ local seen = {}
 
 -- Discovery (the ents.FindInSphere broad-phase + per-candidate straddle tests) is
 -- the bulk of this hook's cost and scales with open-portals x nearby entities. It
--- doesn't need to run every frame: the clone POSE is re-applied per-frame in
--- PreDrawOpaqueRenderables (so clones stay glued regardless), and CLONE_GRACE
+-- doesn't need to run every frame: the ghost POSE is re-applied per-frame in
+-- PreDrawOpaqueRenderables (so ghosts stay glued regardless), and GHOST_GRACE
 -- (0.1s) comfortably outlives the gap, so a record seen on one scan survives until
 -- the next. Running it at ~SCAN_HZ instead of the frame rate cuts the cost without
--- a visible change -- a clone appearing up to SCAN_INTERVAL late as a prop first
+-- a visible change -- a ghost appearing up to SCAN_INTERVAL late as a prop first
 -- crosses is imperceptible at any realistic push speed.
 local SCAN_INTERVAL = 0.04   -- seconds between discovery scans (~25 Hz)
 local nextScan = 0
 
--- A clone depicts a prop mid-transit, so only show one where the prop would
+-- A ghost depicts a prop mid-transit, so only show one where the prop would
 -- actually teleport through this portal. Consult wp-shouldtp -- the SAME
 -- per-entity veto the teleport itself uses -- and skip on an explicit false.
 --
@@ -544,28 +584,28 @@ local nextScan = 0
 -- custom-link part on/off) identically from any viewpoint. We deliberately do NOT
 -- gate on wp-shouldrender: the exterior portal's ShouldRenderPortal returns false
 -- once the camera is far from the exterior box (a TARDIS interior is thousands of
--- units away), so a render-gated clone vanished the moment you stepped INSIDE --
+-- units away), so a render-gated ghost vanished the moment you stepped INSIDE --
 -- even though the emerged half should still show through the interior portal. The
--- clone is a world-space model at the exit; whether the entry portal's SURFACE
--- draws from the current eye is irrelevant to whether the clone should exist.
+-- ghost is a world-space model at the exit; whether the entry portal's SURFACE
+-- draws from the current eye is irrelevant to whether the ghost should exist.
 --
 -- Covers: closed door, TARDIS in the vortex (in flight), interior redecorating,
 -- the prop being the TARDIS's towed/tracked entity, a custom-linked sub-door
 -- switched off, and TardisParts. The downstream ShouldTeleportPortal handlers are
 -- registered shared for the predicted player teleport and read networked state, so
--- this resolves on the client. nil = no veto = clone. (A purely server-side veto --
+-- this resolves on the client. nil = no veto = ghost. (A purely server-side veto --
 -- e.g. tracking's constraint-set check -- can't be seen here, but erring toward
--- showing a clone the server won't teleport is harmless: the prop never crosses
--- the plane, so its clone stays fully clipped and invisible.)
+-- showing a ghost the server won't teleport is harmless: the prop never crosses
+-- the plane, so its ghost stays fully clipped and invisible.)
 local function wouldTeleport(portal, ent)
     return hook.Call("wp-shouldtp", GAMEMODE, portal, ent) ~= false
 end
 
-hook.Add("Think", "WorldPortals_Clones", function()
+hook.Add("Think", "WorldPortals_Ghosts", function()
     if wp.drawing then return end
-    if not GetConVar("worldportals_clones"):GetBool() then
-        if next(wp.clones) then
-            for _, rec in pairs(wp.clones) do endStraddle(rec) end
+    if not GetConVar("worldportals_ghosts"):GetBool() then
+        if next(wp.ghosts) then
+            for _, rec in pairs(wp.ghosts) do endStraddle(rec) end
         end
         return
     end
@@ -603,7 +643,7 @@ hook.Add("Think", "WorldPortals_Clones", function()
     end
 
     for ent, portal in pairs(seen) do
-        local rec = wp.clones[ent]
+        local rec = wp.ghosts[ent]
         if rec and rec.portal ~= portal then
             endStraddle(rec)
             rec = nil
@@ -617,11 +657,11 @@ hook.Add("Think", "WorldPortals_Clones", function()
     -- Expire records not seen this frame once the grace window passes; also
     -- tear down anything that went invalid.
     local expired
-    for ent, rec in pairs(wp.clones) do
-        if not IsValid(ent) or not IsValid(rec.portal) or not IsValid(rec.clone) then
+    for ent, rec in pairs(wp.ghosts) do
+        if not IsValid(ent) or not IsValid(rec.portal) or not IsValid(rec.ghost) then
             expired = expired or {}
             expired[#expired + 1] = rec
-        elseif not seen[ent] and (now - rec.lastSeen) > CLONE_GRACE then
+        elseif not seen[ent] and (now - rec.lastSeen) > GHOST_GRACE then
             expired = expired or {}
             expired[#expired + 1] = rec
         end
@@ -631,14 +671,40 @@ hook.Add("Think", "WorldPortals_Clones", function()
     end
 end)
 
-hook.Add("EntityRemoved", "WorldPortals_Clones", function(ent)
-    local direct = wp.clones[ent]
+-- Hand the ghost off to the new portal pair the INSTANT the entity teleports.
+-- Measured frame-by-frame: the discovery scan runs BEFORE SetupMove in the frame,
+-- so it can't see the just-teleported position until the next frame. For that one
+-- frame the ghost stays bound to the stale entry pair, so poseGhost transforms the
+-- NEW position through the OLD pair and flings the ghost to the wrong place -- it's
+-- drawn there in the portal view as a half-body flicker right at the crossing.
+--
+-- After crossing A->B the entity straddles B from the far side, so its new entry is
+-- B (the portal it emerged from = portal:GetExit()) and its new exit is B's exit.
+-- Re-point the record and recompute the clip planes here, before render -- poseGhost
+-- (PreDrawOpaqueRenderables) then re-poses through the correct pair the same frame.
+-- The next scan confirms/maintains it. wp-teleport fires on every resim pass for the
+-- local player; this is idempotent (same pair each time), so it's resim-safe.
+hook.Add("wp-teleport", "WorldPortals_GhostsTeleport", function(portal, ent)
+    local rec = ent and wp.ghosts[ent]
+    if rec and IsValid(portal) then
+        local newEntry = portal:GetExit()
+        if IsValid(newEntry) and IsValid(newEntry:GetExit()) then
+            rec.portal = newEntry
+            rec.exit = newEntry:GetExit()
+            updatePlanes(rec)
+        end
+    end
+    nextScan = 0
+end)
+
+hook.Add("EntityRemoved", "WorldPortals_Ghosts", function(ent)
+    local direct = wp.ghosts[ent]
     if direct then endStraddle(direct) end
 
-    -- A removed portal/exit/clone invalidates any record referencing it.
+    -- A removed portal/exit/ghost invalidates any record referencing it.
     local victims
-    for e, rec in pairs(wp.clones) do
-        if e ~= ent and (rec.portal == ent or rec.exit == ent or rec.clone == ent) then
+    for e, rec in pairs(wp.ghosts) do
+        if e ~= ent and (rec.portal == ent or rec.exit == ent or rec.ghost == ent) then
             victims = victims or {}
             victims[#victims + 1] = rec
         end
@@ -648,17 +714,17 @@ hook.Add("EntityRemoved", "WorldPortals_Clones", function(ent)
     end
 end)
 
--- Authoritative clone pose, applied after every Think (so cl_init.lua's rapid-loop
+-- Authoritative ghost pose, applied after every Think (so cl_init.lua's rapid-loop
 -- render-follow has finalized the original's SetRenderOrigin) and right before the
 -- scene draws. Re-posing here from the original's live render transform keeps the
--- clone glued to the visible prop even at extreme loop speeds, where a Think-time
+-- ghost glued to the visible prop even at extreme loop speeds, where a Think-time
 -- pose lagged the follow by a sub-frame and split the prop into two offset halves.
-hook.Add("PreDrawOpaqueRenderables", "WorldPortals_ClonePose", function(_, skybox)
+hook.Add("PreDrawOpaqueRenderables", "WorldPortals_GhostPose", function(_, skybox)
     if skybox then return end
-    if not next(wp.clones) then return end
-    for ent, rec in pairs(wp.clones) do
-        if IsValid(ent) and IsValid(rec.clone) and IsValid(rec.exit) then
-            poseClone(rec)
+    if not next(wp.ghosts) then return end
+    for ent, rec in pairs(wp.ghosts) do
+        if IsValid(ent) and IsValid(rec.ghost) and IsValid(rec.exit) then
+            poseGhost(rec)
         end
     end
 end)

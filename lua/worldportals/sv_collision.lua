@@ -15,8 +15,8 @@
 -- addon everything sits on. Touch (not StartTouch) so a portal that opens around
 -- an already-present prop still arms it.
 --
--- The clones (cl_clones.lua) make this read continuously; this file is the
--- physics half. There is intentionally NO collidable clone: a clientside entity
+-- The ghosts (cl_ghosts.lua) make this read continuously; this file is the
+-- physics half. There is intentionally NO collidable ghost: a clientside entity
 -- can't block server props and there's no per-face collision carving, so we make
 -- the real prop pass through the wall rather than fake a solid ghost.
 
@@ -28,7 +28,7 @@ wp.nocollide = wp.nocollide or {}   -- [ent] = { [portal] = { constraints = {} }
 local function eligible(ent, portal)
     if not IsValid(ent) then return false end
     if ent:IsPlayer() then return false end
-    if ent.WPIsClone then return false end
+    if ent.WPIsGhost then return false end
     local cls = ent:GetClass()
     if cls == "linked_portal_door" or cls == "linked_portal_frame" then return false end
     if not IsValid(ent:GetPhysicsObject()) then return false end
@@ -61,7 +61,7 @@ local function gatherWalls(portal, ent)
     local walls, seen = {}, {}
     local function consider(e)
         if not IsValid(e) or seen[e] then return end
-        if e == ent or e.WPIsClone then return end
+        if e == ent or e.WPIsGhost then return end
         local cls = e:GetClass()
         if cls == "linked_portal_door" or cls == "linked_portal_frame" then return end
         seen[e] = true
