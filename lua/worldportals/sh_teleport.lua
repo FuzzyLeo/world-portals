@@ -9,12 +9,40 @@ local ANGLE_VR_YAW_REF = Angle(0, 0, 0)
 -- exact-plane timing, large enough to catch a slow creeper whose accelerated
 -- tick would otherwise step over the plane between two SetupMove evaluations.
 local CROSS_SKIN = 2
+-- Post-teleport re-fire suppression window for NOCLIP only. The normal-movement
+-- re-fire guards (the velocity:Dot(fwd) >= 0 gate and the distNow back-face
+-- guard) both lean on the teleport's MIRRORED exit velocity carrying the player
+-- away from the exit. Noclip discards that velocity (FullNoClipMove rederives it
+-- from input every tick — see backLimit note below), so a player keeps their
+-- pre-teleport WORLD velocity. When entry+exit face similar world directions
+-- (a TARDIS pair) that velocity points back into the exit's face, re-crossing
+-- before the per-teleport view rotation (which DOES apply) can redirect them:
+-- the forward and reverse rotations cancel on alternating ticks and the velocity
+-- never escapes, so the player ping-pongs. The exact landing varies with
+-- geometry — inside the shell (same-facing pair) or in front of the exit face
+-- (pitched pair) — so no single back-face tweak catches them all. Instead, once
+-- a noclip teleport fires, suppress the next one briefly: that lets the single
+-- surviving view rotation steer the velocity out over the following ticks, so
+-- the player flies clear (a clean one-shot transit each way). 0.25s clears the
+-- portal at typical noclip speed; the cooldown is resim-safe (see the since > 0
+-- check) and noclip-gated, so normal-movement teleports are untouched.
+local NOCLIP_TP_COOLDOWN = 0.25
 local function predictPlayerTeleport(ply, mv, cmd)
     if CLIENT and ply ~= LocalPlayer() then return end
     if not ply:Alive() then return end
 
     local velocity = mv:GetVelocity()
     if velocity:LengthSqr() < 1 then return end
+
+    -- Noclip re-teleport cooldown (see NOCLIP_TP_COOLDOWN). CurTime() inside
+    -- SetupMove is the predicted-tick time: identical across every resim of a
+    -- given tick and advancing between ticks. So `since > 0` is exactly false on
+    -- the teleport tick's own resims (the teleport must re-apply every resim) and
+    -- true on the LATER ticks we want to suppress — making this resim-safe.
+    if ply:GetMoveType() == MOVETYPE_NOCLIP and ply.wpNoclipTpAt then
+        local since = CurTime() - ply.wpNoclipTpAt
+        if since > 0 and since < NOCLIP_TP_COOLDOWN then return end
+    end
 
     local origin = mv:GetOrigin()
     local frameTime = FrameTime()
@@ -321,6 +349,12 @@ local function predictPlayerTeleport(ply, mv, cmd)
                     wp.RecordTeleportEvent(portal, origin, newPos, oldEyeAng, clampedAng, oldVel, newVel)
                 end
             end
+        end
+        -- Arm the noclip re-teleport cooldown (see NOCLIP_TP_COOLDOWN). Set on
+        -- both realms from their own CurTime; re-set to the same value on resim
+        -- of this tick (idempotent), and read by later ticks to break the bounce.
+        if ply:GetMoveType() == MOVETYPE_NOCLIP then
+            ply.wpNoclipTpAt = CurTime()
         end
         do return end
         ::cont::
