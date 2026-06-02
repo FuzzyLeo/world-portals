@@ -394,6 +394,23 @@ local function portalActive(portal)
     return override ~= false
 end
 
+-- A clone depicts a prop mid-transit, so only show one where the prop would
+-- actually teleport through this portal. Consult wp-shouldtp -- the SAME
+-- per-entity veto the teleport itself uses -- and skip on an explicit false. This
+-- catches scenarios the per-portal render gate above doesn't: a TARDIS in the
+-- vortex (in flight), an interior being redecorated, the prop being the TARDIS's
+-- towed/tracked entity, or a custom-linked sub-door switched off -- cases where
+-- the portal still renders but a crossing prop must NOT read as continuous because
+-- it isn't going anywhere. The downstream ShouldTeleportPortal handlers are
+-- registered shared for the predicted player teleport and read networked state, so
+-- this resolves on the client. nil = no veto = clone. (A purely server-side veto --
+-- e.g. tracking's constraint-set check -- can't be seen here, but erring toward
+-- showing a clone the server won't teleport is harmless: the prop simply never
+-- crosses the plane, so its clone stays fully clipped and invisible.)
+local function wouldTeleport(portal, ent)
+    return hook.Call("wp-shouldtp", GAMEMODE, portal, ent) ~= false
+end
+
 hook.Add("Think", "WorldPortals_Clones", function()
     if wp.drawing then return end
     if not GetConVar("worldportals_clones"):GetBool() then
@@ -419,7 +436,7 @@ hook.Add("Think", "WorldPortals_Clones", function()
             local ppos = portal:GetPos()
             local r = portal:BoundingRadius() + FIND_MARGIN
             for _, ent in ipairs(ents.FindInSphere(ppos, r)) do
-                if isCandidate(ent) and straddles(ent, portal) then
+                if isCandidate(ent) and straddles(ent, portal) and wouldTeleport(portal, ent) then
                     -- If straddling more than one portal, keep the nearest.
                     local prev = seen[ent]
                     if not prev then
