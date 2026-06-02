@@ -25,13 +25,16 @@
 -- when the teleport fires.
 --
 -- Phase 1: physics props (rigid -- a single SetPos/SetAngles poses the clone).
--- Phase 2: ragdolls. A ragdoll's visible shape is its physics-driven SKELETON,
--- not a rigid transform, so a plain ClientsideModel of the model would draw in
--- its reference (T-)pose. We drive the clone bone-by-bone instead: each frame we
--- read the real ragdoll's world bone matrices and re-emit them through the portal
--- transform onto the clone (see copyBonesThroughPortal). NPCs/players (animated,
--- sequence-driven skeletons) are a later phase -- the same bone-copy path covers
--- them, they just need their own candidate/straddle handling.
+-- Phase 2: skeletal entities -- ragdolls (physics-driven skeleton) and NPCs
+-- (animated, sequence-driven skeleton). Their visible shape is the posed
+-- skeleton, not a rigid transform, so a plain ClientsideModel of the model would
+-- draw in its reference (T-)pose. We drive the clone bone-by-bone instead: each
+-- frame we read the real entity's world bone matrices and re-emit them through
+-- the portal transform onto the clone (see copyBonesThroughPortal). A held weapon
+-- is a separate entity bone-merged onto the hands, so it's mirrored as a second
+-- sub-clone (see updateWeapon / makeWeaponCloneOverride). Players (animated body +
+-- weapon + the local-player viewmodel/hands wrinkle) are a later phase -- same
+-- bone-copy path, they just need their own candidate/straddle handling.
 
 local ENABLE_DEFAULT = "1"
 CreateClientConVar("worldportals_clones", ENABLE_DEFAULT, true, false,
@@ -67,10 +70,11 @@ wp.clones = wp.clones or {}   -- [entity] = record
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsClone then return false end
-    -- prop_physics (rigid) or any ragdoll (prop_ragdoll, plus NPC corpses etc.).
-    -- IsRagdoll() also cleanly excludes our own clones: a clone is a ClientsideModel
-    -- of the model, NOT a ragdoll, and is flagged WPIsClone above regardless.
-    if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll() then return false end
+    -- prop_physics (rigid) or a skeletal entity: a ragdoll (prop_ragdoll, NPC
+    -- corpses) or a live NPC (animated). IsRagdoll()/IsNPC() also cleanly exclude
+    -- our own clones -- a clone is a plain ClientsideModel, neither ragdoll nor
+    -- NPC, and is flagged WPIsClone above regardless.
+    if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll() and not ent:IsNPC() then return false end
     if ent:GetNoDraw() then
         return hook.Call("wp-shouldclone", GAMEMODE, ent) == true
     end
@@ -289,20 +293,20 @@ local function makeOriginalOverride(rec)
     end
 end
 
--- Drive a skeletal clone's pose from the real ragdoll's live skeleton, mirrored
--- through the portal. The clone is a plain ClientsideModel (no physics), so its
--- bones sit in the reference pose until we override them: each frame we read the
--- source's world bone matrices (SetupBones refreshes them to the current physics-
--- driven, networked-interpolated pose) and re-emit each through the SAME rigid
--- portal transform the teleport uses -- TransformPortalPos on the bone origin,
+-- Drive a skeletal clone's pose from the real entity's live skeleton, mirrored
+-- through the portal. The clone is a plain ClientsideModel (no physics, no anim),
+-- so its bones sit in the reference pose until we override them: each frame we
+-- read the source's world bone matrices (SetupBones refreshes them to the current
+-- pose -- physics-driven for a ragdoll, animation-driven for an NPC) and re-emit
+-- each through the SAME rigid portal transform the teleport uses --
+-- TransformPortalPos on the bone origin,
 -- TransformPortalAngle on its orientation, scale carried across. Because that
 -- transform is a proper rotation+translation, transforming origin and orientation
 -- independently is exact, so the clone's exit-half tiles the original's entry-half
 -- seamlessly bone-for-bone. Done inside the RenderOverride (draw time) because
 -- SetBoneMatrix overrides are consumed by the next DrawModel and would otherwise
 -- be clobbered by the engine's own SetupBones for the clone.
-local function copyBonesThroughPortal(rec, clone)
-    local src = rec.ent
+local function copyBonesThroughPortal(rec, src, clone)
     src:SetupBones()
     clone:SetupBones()
     local n = clone:GetBoneCount()
@@ -325,7 +329,7 @@ local function makeCloneOverride(rec)
     return function(self, flags)
         local ent = rec.ent
         if not IsValid(ent) then return end
-        if rec.skeletal then copyBonesThroughPortal(rec, self) end
+        if rec.skeletal then copyBonesThroughPortal(rec, ent, self) end
         local c = ent:GetColor()
         local oldBlend = render.GetBlend()
         local oldEC = render.EnableClipping(true)
@@ -337,6 +341,105 @@ local function makeCloneOverride(rec)
             render.SetBlend(oldBlend)
         render.PopCustomClipPlane()
         render.EnableClipping(oldEC)
+    end
+end
+
+-- An NPC's (or player's) active weapon is a SEPARATE entity bone-merged onto the
+-- hands, so it isn't part of the body's skeleton and the body clone above never
+-- draws it. We mirror it as a second sub-clone, handled symmetrically to the
+-- body: the real weapon gets an entry-plane clip (so its muzzle doesn't poke
+-- unclipped through the portal on the near side, the same artefact the body clip
+-- fixes), and a weapon ClientsideModel at the exit gets the exit-plane clip. The
+-- weapon poses by the SAME bone copy -- its 3 merge bones follow the hand, so
+-- copyBonesThroughPortal reproduces the held pose exactly (verified: a weapon's
+-- GetBoneMatrix(0) == its GetPos, tracking the hand).
+
+local function makeWeaponCloneOverride(rec)
+    return function(self, flags)
+        local w = rec.weapon
+        if not IsValid(w) then return end
+        copyBonesThroughPortal(rec, w, self)
+        local c = w:GetColor()
+        local oldBlend = render.GetBlend()
+        local oldEC = render.EnableClipping(true)
+        render.PushCustomClipPlane(rec.exitNrm, rec.exitD)
+            render.SetColorModulation(c.r / 255, c.g / 255, c.b / 255)
+            render.SetBlend(c.a / 255)
+            self:DrawModel(flags)
+            render.SetColorModulation(1, 1, 1)
+            render.SetBlend(oldBlend)
+        render.PopCustomClipPlane()
+        render.EnableClipping(oldEC)
+    end
+end
+
+local function makeWeaponOriginalOverride(rec)
+    return function(self, flags)
+        local oldEC = render.EnableClipping(true)
+        render.PushCustomClipPlane(rec.entryNrm, rec.entryD)
+            if rec.weaponSavedOverride then
+                rec.weaponSavedOverride(self, flags)
+            else
+                self:DrawModel(flags)
+            end
+        render.PopCustomClipPlane()
+        render.EnableClipping(oldEC)
+    end
+end
+
+-- Tear down weapon tracking: restore the real weapon's RenderOverride and remove
+-- the weapon clone. Safe to call when no weapon is tracked.
+local function clearWeapon(rec)
+    if IsValid(rec.weaponClone) then rec.weaponClone:Remove() end
+    rec.weaponClone = nil
+    if IsValid(rec.weapon) and rec.weapon.RenderOverride == rec.weaponOriginalOverride then
+        rec.weapon.RenderOverride = rec.weaponSavedOverride
+    end
+    rec.weapon = nil
+    rec.weaponModel = nil
+    rec.weaponSavedOverride = nil
+end
+
+-- Keep the weapon sub-clone in step with the NPC/player's current active weapon.
+-- Lazily (re)builds the weapon clone when the held model changes, installs the
+-- entry clip on the real weapon, and parks the clone root at the transformed
+-- weapon pose for culling (its bones are placed in world space by the override).
+local function updateWeapon(rec)
+    local ent = rec.ent
+    if not (ent:IsNPC() or ent:IsPlayer()) then return end
+
+    local w = ent:GetActiveWeapon()
+    local model = IsValid(w) and w:GetModel() or nil
+    if not model or model == "" then
+        clearWeapon(rec)
+        return
+    end
+
+    if rec.weaponModel ~= model then
+        clearWeapon(rec)
+        local wc = ClientsideModel(model, RENDERGROUP_OPAQUE)
+        if not IsValid(wc) then return end
+        wc.WPIsClone = true
+        wc:SetNoDraw(false)
+        wc:DrawShadow(false)
+        wc.RenderOverride = makeWeaponCloneOverride(rec)
+        rec.weaponClone = wc
+        rec.weaponModel = model
+        rec.weaponOriginalOverride = rec.weaponOriginalOverride or makeWeaponOriginalOverride(rec)
+    end
+    rec.weapon = w
+
+    if w.RenderOverride ~= rec.weaponOriginalOverride then
+        rec.weaponSavedOverride = w.RenderOverride
+        w.RenderOverride = rec.weaponOriginalOverride
+    end
+
+    if IsValid(rec.weaponClone) then
+        wp.TransformPortalPosInto(rec.posBuf, w:GetPos(), rec.portal, rec.exit)
+        wp.TransformPortalAngleInto(rec.angBuf, w:GetAngles(), rec.portal, rec.exit)
+        rec.weaponClone:SetPos(rec.posBuf)
+        rec.weaponClone:SetAngles(rec.angBuf)
+        rec.weaponClone:SetSkin(w:GetSkin())
     end
 end
 
@@ -355,6 +458,7 @@ local function endStraddle(rec)
     if IsValid(rec.ent) and rec.ent.RenderOverride == rec.originalOverride then
         rec.ent.RenderOverride = rec.savedRenderOverride
     end
+    clearWeapon(rec)
     wp.clones[rec.ent] = nil
 end
 
@@ -375,9 +479,9 @@ local function startStraddle(ent, portal)
         portal = portal,
         exit = exit,
         clone = clone,
-        -- A ragdoll is skeletal: the clone's pose comes from per-bone matrix copy
-        -- (copyBonesThroughPortal) rather than the rigid root SetPos/SetAngles.
-        skeletal = ent:IsRagdoll(),
+        -- A ragdoll or NPC is skeletal: the clone's pose comes from per-bone matrix
+        -- copy (copyBonesThroughPortal) rather than the rigid root SetPos/SetAngles.
+        skeletal = ent:IsRagdoll() or ent:IsNPC(),
         translucent = isTranslucent(ent),
         lastSeen = SysTime(),
         posBuf = Vector(),
@@ -414,6 +518,7 @@ local function updateStraddle(rec, now)
     poseClone(rec)
     syncAppearance(rec)
     ensureOriginalOverride(rec)
+    updateWeapon(rec)
     return true
 end
 
