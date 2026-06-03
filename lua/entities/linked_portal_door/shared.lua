@@ -86,10 +86,9 @@ function ENT:SetupDataTables()
     self:NetworkVar( "Vector", "ModelPos" )
     self:NetworkVar( "Angle", "ModelAng" )
 
-    -- Rebuild the (server-only) collision frame from the resized opening. Pass the
-    -- new value explicitly -- inside the notify the accessor may still read stale --
-    -- and only touch an already-created frame (initial creation is in Initialize,
-    -- so a premature notify during pre-spawn Set* doesn't spawn an unplaced frame).
+    -- Rebuild the server-only collision frame on resize. Pass the new value
+    -- explicitly (the accessor may still read stale here) and only touch an
+    -- already-created frame (initial creation is in Initialize).
     self:NetworkVarNotify("Width", function(ent, name, old, new)
         ent:SetupBounds(new)
         if SERVER and IsValid(ent.CollisionFrame) then
@@ -109,10 +108,8 @@ function ENT:SetupDataTables()
         end
     end)
 
-    -- If a portal closes or stops teleporting while a prop is passing through its
-    -- wall, restore that wall's collision (otherwise the prop would be clipping a
-    -- now-inert solid). EndTouch covers the prop simply leaving; this covers the
-    -- portal changing under a still-touching prop.
+    -- Restore wall collision if the portal closes/stops teleporting under a still-
+    -- touching prop (EndTouch only covers the prop leaving).
     self:NetworkVarNotify("Open", function(ent, name, old, new)
         if SERVER and not new then wp.DisarmPortal(ent) end
     end)

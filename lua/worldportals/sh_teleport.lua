@@ -1,31 +1,15 @@
 
--- Predicted player teleport. Runs in the prediction loop on both server (every
--- player) and client (LocalPlayer only), so the local player's position stays
--- in lockstep without waiting for the server snapshot. Non-player entities
--- still go through ENT:Touch — they can't be client-predicted.
+-- Predicted player teleport (SetupMove): server for everyone, client for
+-- LocalPlayer, so the local view stays in lockstep without the snapshot.
+-- Non-player entities go through ENT:Touch. See CLAUDE.md for the full flow.
 local ANGLE_VR_YAW_REF = Angle(0, 0, 0)
--- How far in front of the portal plane the eye may already be and still fire
--- this tick (see the crossing test). Small enough to be imperceptible vs the
--- exact-plane timing, large enough to catch a slow creeper whose accelerated
--- tick would otherwise step over the plane between two SetupMove evaluations.
+-- Slack in front of the plane that still fires this tick — catches a slow
+-- creeper whose next, accelerated tick would step over the plane.
 local CROSS_SKIN = 2
--- Post-teleport re-fire suppression window for NOCLIP only. The normal-movement
--- re-fire guards (the velocity:Dot(fwd) >= 0 gate and the distNow back-face
--- guard) both lean on the teleport's MIRRORED exit velocity carrying the player
--- away from the exit. Noclip discards that velocity (FullNoClipMove rederives it
--- from input every tick — see backLimit note below), so a player keeps their
--- pre-teleport WORLD velocity. When entry+exit face similar world directions
--- (a TARDIS pair) that velocity points back into the exit's face, re-crossing
--- before the per-teleport view rotation (which DOES apply) can redirect them:
--- the forward and reverse rotations cancel on alternating ticks and the velocity
--- never escapes, so the player ping-pongs. The exact landing varies with
--- geometry — inside the shell (same-facing pair) or in front of the exit face
--- (pitched pair) — so no single back-face tweak catches them all. Instead, once
--- a noclip teleport fires, suppress the next one briefly: that lets the single
--- surviving view rotation steer the velocity out over the following ticks, so
--- the player flies clear (a clean one-shot transit each way). 0.25s clears the
--- portal at typical noclip speed; the cooldown is resim-safe (see the since > 0
--- check) and noclip-gated, so normal-movement teleports are untouched.
+-- Noclip discards the mirrored exit velocity (FullNoClipMove rederives it from
+-- input), so a same-facing pair (TARDIS) re-crosses and ping-pongs. Briefly
+-- suppress re-fire so the view rotation can steer them clear.
+-- See memory/reference_noclip_velocity_override.md.
 local NOCLIP_TP_COOLDOWN = 0.25
 local function predictPlayerTeleport(ply, mv, cmd)
     if CLIENT and ply ~= LocalPlayer() then return end
@@ -34,11 +18,8 @@ local function predictPlayerTeleport(ply, mv, cmd)
     local velocity = mv:GetVelocity()
     if velocity:LengthSqr() < 1 then return end
 
-    -- Noclip re-teleport cooldown (see NOCLIP_TP_COOLDOWN). CurTime() inside
-    -- SetupMove is the predicted-tick time: identical across every resim of a
-    -- given tick and advancing between ticks. So `since > 0` is exactly false on
-    -- the teleport tick's own resims (the teleport must re-apply every resim) and
-    -- true on the LATER ticks we want to suppress — making this resim-safe.
+    -- since > 0 is resim-safe: CurTime() in SetupMove is the predicted-tick time,
+    -- so it's 0 on the teleport tick's own resims, positive on later ticks.
     if ply:GetMoveType() == MOVETYPE_NOCLIP and ply.wpNoclipTpAt then
         local since = CurTime() - ply.wpNoclipTpAt
         if since > 0 and since < NOCLIP_TP_COOLDOWN then return end
@@ -47,33 +28,11 @@ local function predictPlayerTeleport(ply, mv, cmd)
     local origin = mv:GetOrigin()
     local frameTime = FrameTime()
 
-    -- Two reference points feed the crossing/bounds tests below:
-    --   * the EYE is the camera. It must still be IN FRONT of the portal plane
-    --     when we teleport or the back-face cull (cl_render.lua, on
-    --     portal:GetPos()) stops the stencil and the world shows through before
-    --     the teleport lands. So the eye is the anti-cull / anti-bounce front
-    --     guard (the distNow <= backLimit gate below), and one of the two points
-    --     whose plane-crossing can fire the teleport.
-    --   * the hull CENTRE drives the face bounds, and is the SECOND crossing
-    --     point. We fire when EITHER the eye or the centre reaches the plane.
-    --
-    -- Why both, not the eye alone: the eye sits a fixed ~28u straight ABOVE the
-    -- centre (purely vertical — measured), so along a portal's normal the two
-    -- differ by 28 * forward.z, i.e. only the portal's PITCH matters, never yaw:
-    --   * upright/vertical portal (forward.z ~= 0): eye and centre are at the
-    --     same depth, so "either crosses" is bit-for-bit the old eye-only test —
-    --     no change to the common wall portal at any yaw.
-    --   * ceiling / downward-pitched (forward.z < 0): the eye LEADS (going up
-    --     into the plane the highest point crosses first), so it still fires
-    --     first and the centre term never triggers earlier — also unchanged.
-    --   * floor / upward-pitched (forward.z > 0): the centre LEADS. The eye is
-    --     the highest point, so against an up-facing portal it crosses LAST — and
-    --     when you rest on whatever's under the opening (e.g. a TARDIS shell) your
-    --     feet stop before the eye ever reaches the plane, so an eye-only test
-    --     can't fire while standing and only fires deep/late on a fall. Firing on
-    --     the centre catches the body crossing mid-fall, retaining entry velocity.
-    --     This is the only case the change affects. (A dead-still rest is still
-    --     skipped by the velocity gate above; that case needs a separate path.)
+    -- Two crossing points: the EYE (also the anti-cull front guard — it must
+    -- stay in front of portal:GetPos() or the stencil culls) and the hull CENTRE
+    -- (also drives the face bounds). Fire when EITHER crosses. They differ only
+    -- by 28*forward.z, so walls are unchanged and only floor portals gain the
+    -- centre trigger (an eye-only test can't fire while you stand on one).
     local eyePos = ply:EyePos()
     local nextEyeX = eyePos.x + velocity.x * frameTime
     local nextEyeY = eyePos.y + velocity.y * frameTime
@@ -100,81 +59,30 @@ local function predictPlayerTeleport(ply, mv, cmd)
         if velocity:Dot(fwd) >= 0 then goto cont end
 
         local pos = portal:GetPos()
-        -- Crossing test against the portal plane (= portal:GetPos(), the same
-        -- plane cl_render.lua's wp.shouldrender culls the back face on — once
-        -- the eye crosses it the stencil stops rendering and the world behind
-        -- shows through, so the teleport must fire before then).
+        -- Plane = portal:GetPos(), the same plane cl_render.lua culls on, so the
+        -- teleport must fire before the cull hides the volume.
         local distNow  = (eyePos.x - pos.x) * fwd.x + (eyePos.y - pos.y) * fwd.y + (eyePos.z - pos.z) * fwd.z
-        -- Re-teleport guard. The eye must be IN FRONT of the plane to fire,
-        -- EXCEPT inside a thick portal's own depth. A teleport lands the player
-        -- ON / just behind the EXIT face (the mirror transform puts the eye a
-        -- unit or two past it), and the pair are each other's exits, so a plain
-        -- "must be in front" rule (distNow <= 0) is what stops the exit
-        -- immediately re-firing and bouncing the player back — a confirmed
-        -- double-teleport.
-        --
-        -- But a thick (inverse-3D) portal renders its exit view through the
-        -- whole volume between its face (pos) and its back-cull plane
-        -- (pos - fwd*thickness): that volume is walkable and shows the exit,
-        -- e.g. the exterior box shell you stand inside while seeing the
-        -- interior. The mirror lands the emerging eye INSIDE that volume, so a
-        -- flat distNow <= 0 guard traps the player there and lets them walk the
-        -- full depth into the shell (the reported bug). Allow firing down to
-        -- the back-cull plane instead: walking back into the volume then
-        -- re-crosses and teleports cleanly. This still can't bounce on
-        -- emergence — the player leaves the volume moving OUT
-        -- (velocity:Dot(fwd) >= 0, already skipped above); only deliberate
-        -- backward motion reaches here. Thin portals (thickness <= 0) keep the
-        -- exact distNow <= 0 guard, so their behaviour is unchanged.
-        --
-        -- NOCLIP EXCEPTION: the "can't bounce on emergence" reasoning relies on
-        -- the mirrored exit velocity carrying the player back OUT of the volume.
-        -- The engine's FullNoClipMove rederives velocity from the held input +
-        -- view every tick and discards mv:SetVelocity, so a noclipping player
-        -- keeps their pre-teleport WORLD velocity instead. When entry and exit
-        -- face the same world direction (e.g. a TARDIS interior/exterior pair
-        -- both facing +X), that un-mirrored velocity points straight into the
-        -- exit's front face: the eye emerges a few units inside the shell
-        -- (measured ~7u into a 42u shell) still moving inward, so the backLimit
-        -- window re-fires it — an infinite interior<->exterior bounce. The
-        -- backLimit only ever guarded against a *walking* player getting trapped
-        -- in the shell, which can't happen in noclip (no collision — they fly
-        -- straight through the volume), so fall back to the flat distNow <= 0
-        -- guard there. (Restores pre-thick-volume-allowance noclip behaviour.)
+        -- Re-teleport guard: the eye must be in front of the plane to fire, so
+        -- the exit (the pair are each other's exits) doesn't immediately re-fire
+        -- and bounce the player. Thick portals allow firing back to the cull
+        -- plane so you can re-cross their walkable volume — except in noclip,
+        -- where the un-mirrored velocity would just re-fire the bounce.
+        -- See memory/reference_noclip_velocity_override.md.
         local thickness = portal:GetThickness()
         local backLimit = (thickness > 0 and ply:GetMoveType() ~= MOVETYPE_NOCLIP) and -thickness or 0
         if distNow <= backLimit then goto cont end
         local distNext = (nextEyeX - pos.x) * fwd.x + (nextEyeY - pos.y) * fwd.y + (nextEyeZ - pos.z) * fwd.z
-        -- The hull centre, swept the same way (this tick / next tick along the
-        -- portal normal). It is the SECOND crossing point — see the reference-
-        -- point note at the top of this function for why firing on either the
-        -- eye or the centre is identical to the old eye-only test on upright and
-        -- downward portals and only changes upward-facing ones.
+        -- Hull centre swept the same way — the second crossing point.
         local centerNow  = (hullCenterX - pos.x) * fwd.x + (hullCenterY - pos.y) * fwd.y + (hullCenterZ - pos.z) * fwd.z
         local centerNext = (nextCenterX - pos.x) * fwd.x + (nextCenterY - pos.y) * fwd.y + (nextCenterZ - pos.z) * fwd.z
-        -- A point "reaches" the plane when it crosses this tick (...Next <= 0) OR
-        -- it is already within CROSS_SKIN of the plane while moving toward it
-        -- (guaranteed by the velocity:Dot(fwd) < 0 gate above). The skin is the
-        -- slow-walk safety net: a player who creeps to a near-stop just short of
-        -- the plane and then accelerates moves further in the *next* (accelerated)
-        -- tick than ...Next — computed here from this tick's slow velocity —
-        -- predicts, so the crossing slab is stepped over and the distNow <= 0
-        -- guard then blocks it for the rest of the walk-through. A near-stop
-        -- creeper dwells several ticks within the skin and the first accelerated
-        -- tick from rest moves well under a unit, so a small skin reliably catches
-        -- it; fast movers hit ...Next <= 0 first, so their (correct, at-the-plane)
-        -- timing is unchanged. Fire when EITHER point reaches; skip only if both
-        -- are still short of it.
+        -- "Reaches" = crosses next tick, or already within CROSS_SKIN moving
+        -- toward the plane (the slow-walk net; fast movers hit the cross first).
         local eyeReaches    = distNext   <= 0 or distNow   <= CROSS_SKIN
         local centerReaches = centerNext <= 0 or centerNow <= CROSS_SKIN
         if not (eyeReaches or centerReaches) then goto cont end
 
-        -- Face bounds: the hull CENTRE must lie within the portal opening.
-        -- Testing the centre (not the eye) is what fixes the jump-over — when
-        -- you jump through a doorway the eye rises above the top edge but the
-        -- body's mid-point still passes through the opening, so an eye-Z test
-        -- spuriously fails while a centre-Z test passes. WorldToLocal folds in
-        -- the portal's pitch/yaw/roll, so this holds at any orientation.
+        -- Face bounds on the hull CENTRE, not the eye — fixes the jump-over (the
+        -- eye clears the top edge while the body still passes through).
         local localCenter = portal:WorldToLocal(Vector(hullCenterX, hullCenterY, hullCenterZ))
         local mins, maxs = portal:GetCollisionBounds()
         if localCenter.y < mins.y or localCenter.y > maxs.y or localCenter.z < mins.z or localCenter.z > maxs.z then
@@ -201,60 +109,21 @@ local function predictPlayerTeleport(ply, mv, cmd)
         local clampedAng = Angle(newAng.p, newAng.y, 0)
         mv:SetOrigin(newPos)
         mv:SetVelocity(newVel)
-        -- mv:SetAngles is what gamemovement reads to decide which world
-        -- direction W/S/A/D push toward; without it the engine still uses the
-        -- pre-teleport view angles for input, which manifests as "walking
-        -- backward through a portal mangles your motion direction" because
-        -- backward input * old view ≠ backward input * new view.
+        -- mv:SetAngles is what gamemovement reads for W/S/A/D direction; without
+        -- it, walking backward through a portal mangles your motion direction.
         mv:SetAngles(clampedAng)
         cmd:SetViewAngles(clampedAng)
-        -- ply:SetPos resets the AbsOrigin interp cache that mv:SetOrigin
-        -- doesn't touch, and makes ply:GetPos() report the post-teleport
-        -- position before the wp-teleport hook fires below. A consumer unstick
-        -- (Doors) reads ply:GetPos() to decide where to relocate the player, so
-        -- this has to hold on EVERY prediction pass, resim included. The
-        -- teleport mv:SetOrigin above re-runs each resim; if ply:SetPos (and the
-        -- unstick that depends on it) only ran first-time-predicted, every resim
-        -- would leave the predicted origin at the raw transform. At high ping
-        -- the crossing command stays unacked — and therefore resimulated — for
-        -- ~RTT, so that raw pos (often embedded in the exit geometry) is what the
-        -- player sits at until the server snapshot finally corrects them: the
-        -- "stuck after teleport, un-stuck once the lag catches up" bug. Re-snaps
-        -- to the same deterministic value every resim, which is harmless.
+        -- Every pass (resim included): resets the AbsOrigin interp cache and
+        -- makes ply:GetPos() report the destination before wp-teleport runs, so
+        -- a consumer unstick resolves against it. First-time-only here left the
+        -- player stuck at the raw transform for ~RTT at high ping.
+        -- See memory/reference_predict_resim_consumer_sideeffects.md.
         ply:SetPos(newPos)
-        -- ply:SetEyeAngles — client-only, first-time-predicted only.
-        --
-        -- Why client: cmd:SetViewAngles alone leaves the persistent
-        -- m_angEyeAngles on its last-input value, so directional portals
-        -- visibly no-op locally without this — SetEyeAngles is what actually
-        -- rotates the camera. The rotated angle then rides out in the player's
-        -- subsequent cmds (mouse is sampled relative to it), so the server
-        -- picks it up via cmd:GetViewAngles and converges to it on its own —
-        -- no explicit server write needed.
-        --
-        -- Why first-time only: SetEyeAngles writes a persistent field that
-        -- survives resim, so calling it during resim clobbers mouse delta the
-        -- user has accumulated since (camera "snaps back" mid-look).
-        --
-        -- Why NOT on the server (in multiplayer): a server write makes
-        -- m_angEyeAngles authoritative, and the snapshot pushes it back to the
-        -- owning client ~RTT later, overriding any mouse the user moved during
-        -- that window — a confirmed, reproducible snap-back of in-flight look
-        -- input. We tried a server-side write to kill a suspected angle-
-        -- rollback; the rollback did not reproduce in clean testing (the client
-        -- rotation propagates via cmds as above), and the write's snap-back was
-        -- strictly worse. See memory/reference_predict_angle_contamination.md.
-        --
-        -- SINGLEPLAYER EXCEPTION: in singleplayer the engine runs no client-
-        -- side prediction — SetupMove/Move/FinishMove fire on the SERVER realm
-        -- only, so this whole function never executes on the client and the
-        -- CLIENT-gated SetEyeAngles never lands, leaving the view un-rotated on
-        -- entry (the position teleport still works because that's server-side).
-        -- The snap-back reason above doesn't apply in SP: there's no
-        -- prediction, no RTT, no snapshot-override window — server and client
-        -- are synchronous, so the server write IS the correct (and only) way to
-        -- rotate the view. game.SinglePlayer() is false on a listen server, so
-        -- the multiplayer path is untouched.
+        -- SetEyeAngles actually rotates the camera (cmd:SetViewAngles alone
+        -- no-ops). Client + first-time only: a server write or a resim re-write
+        -- both snap back mouse moved during the window. SP runs no client
+        -- prediction, so there the server write is the only path. See
+        -- memory/reference_predict_angle_contamination.md + reference_singleplayer_no_prediction.md.
         if (CLIENT and IsFirstTimePredicted()) or (SERVER and game.SinglePlayer()) then
             ply:SetEyeAngles(clampedAng)
         end
@@ -269,19 +138,14 @@ local function predictPlayerTeleport(ply, mv, cmd)
             portal:TriggerOutput("OnPlayerTeleportFromMe", ply)
             exit:TriggerOutput("OnPlayerTeleportToMe", ply)
             hook.Call("wp-teleport", GAMEMODE, portal, ply, newPos, newAng)
-            -- A wp-teleport consumer (e.g. Doors' unstick) may have repositioned
-            -- the player via ply:SetPos. That ran inside SetupMove, so without
-            -- folding it back into mv the move's FinishMove overwrites the entity
-            -- origin with the pre-adjust mv value and the relocation is lost.
-            -- Re-read and re-commit so it survives; the reassigned newPos then
-            -- rides out in the broadcast below so remote snaps match the landing.
+            -- Fold a consumer's ply:SetPos relocation back into mv, else
+            -- FinishMove reverts it. newPos rides out in the broadcast below.
             local finalPos = ply:GetPos()
             if finalPos ~= newPos then
                 mv:SetOrigin(finalPos)
                 newPos = finalPos
             end
-            -- Remote clients still need an immediate position update; the
-            -- player who crossed predicts it themselves and skips the apply.
+            -- Remote clients need an immediate update; the crosser predicted it.
             net.Start("WorldPortals_Teleport")
                 net.WriteEntity(portal)
                 net.WriteEntity(ply)
@@ -289,60 +153,28 @@ local function predictPlayerTeleport(ply, mv, cmd)
                 net.WriteAngle(newAng)
             net.Broadcast()
         else
-            -- CLIENT (LocalPlayer). The wp-teleport hook and the mv re-sync
-            -- below run on EVERY prediction pass — first-time AND resim. A
-            -- consumer unstick (Doors) repositions the player via ply:SetPos
-            -- from inside the hook; that relocation has to be reproduced on each
-            -- resim or FinishMove reverts the predicted origin to the raw
-            -- transform. Because the crossing command is resimulated for the
-            -- whole ~RTT it stays unacked at high ping, skipping resim here is
-            -- exactly what left the player stuck at the raw pos until the server
-            -- snapshot corrected them. The unstick is a pure, deterministic
-            -- position resolver (matching the server's), so re-running it every
-            -- pass yields the identical landing — which is what prediction
-            -- requires. (Consumers' wp-teleport handlers must therefore be
-            -- idempotent and resim-safe, like all prediction-path code.)
+            -- CLIENT (LocalPlayer), every pass — first-time AND resim. The hook
+            -- (and the mv re-sync below folding a consumer relocation back in)
+            -- must re-run each resim or the player reverts to the raw transform
+            -- for the unacked window. Consumers' wp-teleport handlers must be
+            -- idempotent/resim-safe. See memory/reference_predict_resim_consumer_sideeffects.md.
             hook.Call("wp-teleport", GAMEMODE, portal, ply, newPos, newAng)
-            -- Fold any consumer relocation (ply:SetPos in the hook) back into mv
-            -- so the move keeps the adjusted origin; FinishMove would otherwise
-            -- revert it. The reassigned newPos rides out to the predict-window
-            -- arming below so it matches the server's broadcast pos.
             local finalPos = ply:GetPos()
             if finalPos ~= newPos then
                 mv:SetOrigin(finalPos)
                 newPos = finalPos
             end
-            -- One-time client side effects: first-time-predicted ONLY. These arm
-            -- persistent client-frame state that must NOT re-fire on resim (every
-            -- resim runs within the same frame, so re-arming would reset the roll
-            -- fade / predict-lerp window / debug record every frame for the whole
-            -- unacked window). They read the post-unstick newPos set just above:
-            -- cl_teleport.lua's getPredictDelta sanity guard compares
-            -- NetworkOrigin against predictedPos and the server broadcasts this
-            -- same final pos, so predictedPos must equal it.
+            -- First-time only: arm persistent client-frame state that must NOT
+            -- re-fire on resim (re-arming would reset it every frame all window).
             if IsFirstTimePredicted() then
-                -- Roll fade-in + stair-smoothing strip window. Shared with the
-                -- singleplayer path (cl_init.lua's WorldPortals_Teleport net
-                -- handler) via this helper so both realms arm identical client-
-                -- frame corrections. The predict-lerp window below is armed
-                -- separately because it's prediction/ping-only (unneeded in SP).
+                -- Roll fade + stair strip; shared with the SP net handler.
                 if wp.ArmTeleportView then wp.ArmTeleportView(newAng) end
-                -- Arm the predict-lerp shift window. ply:SetPos snaps the entity
-                -- but the engine still lerps AbsOrigin from the pre-teleport
-                -- snapshot for ~RTT until a snapshot captured after the server
-                -- ran SetupMove arrives. CalcView/CalcViewModelView in
-                -- cl_teleport.lua shift the camera + viewmodel by
-                -- (NetworkOrigin - GetPos) each frame during this window so the
-                -- scene renders from where the server thinks the player is
-                -- (eye-in-renderbounds works, no blank-sky frame). Disarms on
-                -- convergence or timeout. Local playermodel is left to lerp —
-                -- SetRenderOrigin is a no-op for the local player and the model
-                -- isn't visible to ourselves in first-person anyway.
-                -- SysTime, not CurTime: CurTime inside SetupMove is the
-                -- predicted-tick time (advanced into the future), so comparing
-                -- against CurTime in CalcView yields negative ages.
+                -- Predict-lerp shift window: CalcView shifts the camera by
+                -- (NetworkOrigin - GetPos) while the engine lerps AbsOrigin for
+                -- ~RTT after the snap. SysTime, not CurTime (see CLAUDE.md +
+                -- memory/reference_predict_engine_limits.md).
                 wp.predictedPos = newPos
-                wp.predictedOldPos = origin  -- pre-teleport pos, used by getPredictDelta sanity check
+                wp.predictedOldPos = origin
                 wp.predictedAt = SysTime()
                 wp.predictArmCount = (wp.predictArmCount or 0) + 1
                 if wp.RecordTeleportEvent then
@@ -350,9 +182,7 @@ local function predictPlayerTeleport(ply, mv, cmd)
                 end
             end
         end
-        -- Arm the noclip re-teleport cooldown (see NOCLIP_TP_COOLDOWN). Set on
-        -- both realms from their own CurTime; re-set to the same value on resim
-        -- of this tick (idempotent), and read by later ticks to break the bounce.
+        -- Arm the noclip re-teleport cooldown (idempotent across resim).
         if ply:GetMoveType() == MOVETYPE_NOCLIP then
             ply.wpNoclipTpAt = CurTime()
         end
@@ -440,17 +270,10 @@ function WorldPortals_TraceLine(data)
                 mask = data.mask,
                 filter = newFilter,
             })
-            -- Keep StartPos as the ORIGINAL requested start, not the exit-side
-            -- re-trace start. Every non-portal trace reports StartPos == the
-            -- start you asked for, and consumers rely on it: the sandbox camera
-            -- tool places the camera at trace.StartPos expecting the player's
-            -- eye, so a redirected StartPos spawned the camera inside the portal.
-            -- HitPos/Entity/Normal stay the exit-side results, so see-through
-            -- traces (line-of-sight, +use, tool HitPos placement) are unchanged
-            -- -- only StartPos is restored. (StartPos and HitPos then sit on
-            -- opposite sides of the portal, so anything deriving a ray from
-            -- HitPos - StartPos sees a portal-crossing vector; the bullet path
-            -- doesn't use this -- it rewrites Src/Dir in EntityFireBullets.)
+            -- Keep the original StartPos (not the exit-side start): consumers
+            -- expect StartPos == the start they asked for (the camera tool
+            -- spawned inside the portal otherwise). HitPos/Entity/Normal stay
+            -- exit-side, so see-through traces are unchanged.
             tr.StartPos = trace.StartPos
             return tr
         end

@@ -92,25 +92,15 @@ function wp.TransformPortalPos( vec, portal, exit_portal )
 
 end
 
--- Transforms a vector (direction) from one portal to another.
---
--- Uses the same WorldToLocal -> 180-yaw mirror -> LocalToWorld pipeline as
--- TransformPortalPos / TransformPortalAngle, so it composes the two portals'
--- orientations as real rotations at any pitch/yaw/roll. The previous version
--- approximated the rotation as `exit:GetAngles() - portal:GetAngles()` (Euler
--- subtraction), which only equals a true rotation for yaw-only (wall) pairs.
--- For floor/ceiling or rolled portals it produced the wrong axis and silently
--- FLIPPED the velocity: falling straight down through a floor portal came out
--- of the ceiling exit moving straight UP, bouncing the player back out and
--- gaining height every pass (the confirmed infinite-fall bounce). Validated
--- in-engine against the displacement TransformPortalPos maps a small offset to
--- (velocity is the spatial derivative of the position transform) — this form
--- matches that ground truth for every pair; the subtraction form did not.
+-- Transforms a vector (direction) through a portal pair. Same WorldToLocal ->
+-- 180-yaw mirror -> LocalToWorld pipeline as the position/angle transforms, so
+-- it's a real rotation at any pitch/roll. The old `exit:GetAngles() -
+-- portal:GetAngles()` Euler subtraction silently flipped velocity on floor/
+-- ceiling/rolled pairs (the infinite-fall bounce).
 function wp.TransformPortalVector( vec, portal, exit_portal )
 
-    -- vec is a direction, so feed it through with a zero origin: only the
-    -- rotation half of WorldToLocal/LocalToWorld applies. WorldToLocal returns
-    -- a fresh vector, so the caller's input is left untouched.
+    -- Direction-only: zero origin so only the rotation applies. WorldToLocal
+    -- returns a fresh vector, so the caller's input is untouched.
     local l_vec = WorldToLocal( vec, ANGLE_ZERO, VECTOR_ORIGIN, portal:GetAngles() )
     l_vec:Rotate( ANGLE_YAW_180 )
     local w_vec = LocalToWorld( l_vec, ANGLE_ZERO, VECTOR_ORIGIN, exit_portal:GetAngles() + exit_portal:GetExitAngOffset() )

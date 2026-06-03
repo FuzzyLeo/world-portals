@@ -107,40 +107,13 @@ net.Receive("WorldPortals_VRMod_SetAngle", function()
     end
 end)
 
--- Bypass entity interpolation for props caught in a rapid teleport loop.
---
--- GMod renders networked entities cl_interp (default 0.1s) in the past and
--- resets the interpolation history on every teleport. A prop in a tight portal
--- loop -- e.g. an infinite fall between a floor and ceiling portal -- teleports
--- many times per second, faster than the ~0.1s interpolation can recover
--- between resets, so the rendered position freezes at each post-teleport point
--- and only jumps on the next wrap: an ~8 Hz stutter no matter the framerate.
--- While such a prop is looping we render it at its live GetNetworkOrigin/
--- GetNetworkAngles instead, which tracks the real motion at the snapshot rate.
---
--- Only RAPID loops engage this. A single or occasional teleport interpolates
--- fine on its own (and engaging the override there would just trade the stutter
--- for the boundary seam below), so we wait for a SECOND teleport within
--- RAPID_WINDOW before taking over; a lone teleport leaves a record the Think
--- hook prunes. SetRenderOrigin is a no-op on the local player and only
--- non-player entities are armed, so the predicted local-player path is left
--- alone.
---
--- Switching rendering source has a latency seam (override is ~now, normal
--- interpolation is ~now-cl_interp), handled differently at each boundary:
---   * ENTER: snap to the live transform. Engaging coincides with a real
---     teleport, and the interpolated position is then one teleport behind the
---     networked one -- easing between them would slide the prop bodily across
---     the portal gap. A snap reads as the teleport it is.
---   * EXIT: once teleports stop the interpolation is clean again, so ease
---     (lerp) from the networked transform back to the interpolated one over
---     RENDER_BLEND_TIME, then release. ACCEPTED LIMIT: a prop that leaves the
---     loop still MOVING (e.g. physgunned out) has ~cl_interp of motion handed
---     back to interpolation, which reads as a brief freeze; a prop that exits
---     by coming to rest has no give-back and no freeze. Eliminating it would
---     need the override to run at matched cl_interp latency (a teleport-aware
---     interpolation buffer) -- deliberately not done. See
---     memory/reference_prop_teleport_interp.md.
+-- Bypass entity interpolation for a prop in a rapid teleport loop. GMod renders
+-- entities cl_interp in the past and resets the interp history on every teleport,
+-- so a prop looping faster than ~0.1s freezes into an ~8 Hz stutter. While
+-- looping we render it at its live GetNetworkOrigin/Angles instead: snap on enter
+-- (it's a real teleport), ease back to interpolation on exit. Only RAPID loops
+-- engage (a lone teleport interpolates fine). Accepted limit: a prop leaving the
+-- loop still moving gets a brief freeze. See memory/reference_prop_teleport_interp.md.
 wp.renderFollow = wp.renderFollow or {}
 local RAPID_WINDOW       = 0.2   -- two teleports within this => a loop interp can't track
 local RENDER_FOLLOW_TIME = 0.3   -- keep following for this long after the last teleport
@@ -195,22 +168,11 @@ net.Receive("WorldPortals_Teleport", function()
         -- don't double-fire the hook or yank the predicted position.
         if ent == LocalPlayer() then
             if wp.RecordNetTeleport then wp.RecordNetTeleport(new_pos) end
-            -- Singleplayer runs no client-side prediction, so sh_teleport.lua's
-            -- prediction branch never ran for us at all: it never armed our roll
-            -- fade / stair-strip window, and never fired the CLIENT-realm
-            -- wp-teleport hook. Drive both from the authoritative broadcast
-            -- instead. The client-side wp-teleport is what re-points the local
-            -- player's OWN ghost pair the instant it crosses (cl_ghosts.lua's
-            -- WorldPortals_GhostsTeleport) -- without it the ghost lags a frame
-            -- behind the crossing and flickers a half body. The server already
-            -- fired wp-teleport for its authoritative unstick; this is just the
-            -- client-realm fire the predicted path normally provides, and
-            -- consumers are idempotent so a single fire is safe.
-            --
-            -- On a listen server this message also reaches us, but the
-            -- prediction branch already did all of this ~RTT ago -- re-arming
-            -- the fade mid-decay and double-firing the hook -- so gate on
-            -- SinglePlayer().
+            -- SP runs no client prediction, so the prediction branch never armed
+            -- our roll/stair window or fired the client-realm wp-teleport (which
+            -- re-points our own ghost pair). Drive both from the broadcast here.
+            -- Gate on SinglePlayer: on a listen server the prediction branch
+            -- already did this ~RTT ago. See memory/reference_singleplayer_no_prediction.md.
             if game.SinglePlayer() then
                 if wp.ArmTeleportView then wp.ArmTeleportView(new_angle) end
                 hook.Call("wp-teleport", GAMEMODE, portal, ent, new_pos, new_angle)
@@ -220,10 +182,8 @@ net.Receive("WorldPortals_Teleport", function()
         ent:SetPos( new_pos )
         if not ent:IsPlayer() then
             ent:SetAngles( new_angle )
-            -- Engage render-follow only for RAPID loops: record this teleport,
-            -- and take over (or refresh the window) only when another teleport
-            -- already landed within RAPID_WINDOW. A lone teleport just leaves a
-            -- record the Think hook prunes. Refreshing cancels any exit blend.
+            -- Engage render-follow only for RAPID loops: take over only when a
+            -- prior teleport landed within RAPID_WINDOW (a lone tp interpolates fine).
             local now = SysTime()
             local rec = wp.renderFollow[ent]
             if rec then

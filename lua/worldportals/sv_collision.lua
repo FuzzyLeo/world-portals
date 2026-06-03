@@ -1,24 +1,11 @@
--- Portal-aware collision for transiting props.
---
--- A portal is usually mounted flush against a solid entity (a TARDIS exterior
--- shell, its door parts, an interior back wall). The teleport only fires once a
--- prop's centre crosses the portal plane (init.lua ENT:Touch), so a decent-sized
--- prop pushed at the portal jams on that wall before it can cross. While a prop
--- is touching an open teleport-enabled portal we no-collide it with the wall
--- entities (via constraint.NoCollide), so it passes through instead of jamming.
--- The portal's collision frame (linked_portal_frame) keeps it funnelled through
--- the opening cross-section while the wall is "removed" for it.
---
--- Arming is driven by the portal's trigger Touch (the portal is a SetTrigger
--- entity), not a per-tick proximity scan: Touch is event-driven and only fires
--- for entities actually overlapping the doorway, which is far cheaper on a base
--- addon everything sits on. Touch (not StartTouch) so a portal that opens around
--- an already-present prop still arms it.
---
--- The ghosts (cl_ghosts.lua) make this read continuously; this file is the
--- physics half. There is intentionally NO collidable ghost: a clientside entity
--- can't block server props and there's no per-face collision carving, so we make
--- the real prop pass through the wall rather than fake a solid ghost.
+-- Portal-aware collision for transiting props. A portal is usually mounted flush
+-- against a solid (a TARDIS shell), so a decent-sized prop jams on that wall
+-- before its centre can cross the plane. While a dynamic prop touches an open
+-- teleport-enabled portal we no-collide it with the wall (constraint.NoCollide)
+-- so it passes through; the collision frame (linked_portal_frame) keeps it
+-- funnelled through the opening. Armed from the portal's trigger Touch (event-
+-- driven, cheap). No collidable ghost — clientside can't block server props.
+-- See CLAUDE.md.
 
 if not SERVER then return end
 
@@ -44,19 +31,11 @@ local function eligible(ent, portal)
     return true
 end
 
--- The wall entities a transiting prop should pass through: candidates are the
--- portal's parent + that parent's children/constraint network, unioned with
--- whatever the wp-nocollide consumer hook returns -- but a candidate is only
--- actually no-collided if it OPTS IN with `ent.PortalNoCollide == true`.
---
--- Opt-in (default solid) is deliberate: a portal's parent can be a large interior
--- model, and no-colliding it by default would let a transiting prop fall through
--- the whole interior into the void. So the consumer explicitly flags exactly what
--- should be phased -- the shell the portal is mounted on, the entry wall -- and
--- everything else (floor, decor, the interior model itself) stays solid. A missed
--- flag just jams the prop (recoverable); it can never drop it into the world.
--- Never the portal or its frame (the frame must keep bounding the prop) nor the
--- prop itself, and only entities with a physics object (NoCollide needs one).
+-- Wall entities a transiting prop passes through: the portal's parent +
+-- constraint network + whatever wp-nocollide returns, but only those that opt in
+-- with `ent.PortalNoCollide == true`. Opt-in (default-solid) is deliberate — a
+-- missed flag just jams the prop (recoverable), never drops it into the void.
+-- Never the portal/frame/prop, and only entities with a physics object.
 local function gatherWalls(portal, ent)
     local walls, seen = {}, {}
     local function consider(e)
@@ -91,30 +70,16 @@ local function gatherWalls(portal, ent)
     return walls
 end
 
--- Permanently no-collide a collision FRAME with the wall it sits flush against (the
--- portal's parent + that parent's network). The frame is intentionally UNPARENTED
--- (so the transit no-collide can't propagate into it), which means it no longer gets
--- the free parent<->child no-collision it had when parented -- so its solid hull
--- interpenetrates the TARDIS shell and the physics solver launches the whole TARDIS.
--- This restores that no-collision explicitly. It does NOT affect prop<->frame: the
--- pair is frame<->wall, and neither the prop nor the frame is a parented descendant
--- of the other, so transiting props still collide with the frame.
---
--- Re-runnable and idempotent per wall: only creates a pair for a wall not already
--- handled, so it's cheap to call periodically (the wall set can change late -- the
--- portal is parented to the shell after frame creation, parts are added, demat/remat).
--- DeleteOnRemove ties each pair's lifetime to the frame; permanent otherwise.
+-- Restore the frame<->wall no-collision the unparented frame lost (else its solid
+-- hull interpenetrates the shell and the solver launches the TARDIS). Doesn't
+-- touch prop<->frame, so transiting props still collide with the frame.
+-- Idempotent per wall, so cheap to re-run as the wall set changes late.
 function wp.NoCollideFrame(frame, portal)
     if not (IsValid(frame) and IsValid(portal)) then return end
-    -- ONLY the portal's parent (the wall/shell the frame sits in). Source propagates a
-    -- NoCollide down the parent's entire parented subtree, so this one pair also covers
-    -- every part parented under the shell -- equivalent to the free parent<->child
-    -- no-collision the frame had when it was itself parented. We must NOT walk the
-    -- constraint network (gatherWalls) here: constraint.GetAllConstrainedEntities
-    -- includes logic_collision_pair links, so an ARMED transiting prop (no-collided
-    -- with the shell) shows up there, and the frame would then wrongly no-collide the
-    -- prop -- so the frame stops bounding it AND that no-collide outlives the prop's
-    -- shell-arm. Parent-only sidesteps the whole feedback loop.
+    -- ONLY the portal's parent: Source propagates the NoCollide down its whole
+    -- parented subtree, covering every part. Walking the constraint network would
+    -- pull in an armed transiting prop (it shows up via logic_collision_pair) and
+    -- make the frame wrongly stop bounding it — parent-only avoids that loop.
     local wall = portal:GetParent()
     if not IsValid(wall) then return end   -- free-standing portal: no wall to phase
     frame.WallNoCollides = frame.WallNoCollides or {}
@@ -132,11 +97,9 @@ end
 function wp.ArmNoCollide(portal, ent)
     if not (IsValid(portal) and IsValid(ent)) then return end
 
-    -- Already-armed check BEFORE eligible(): once we no-collide the prop with the
-    -- wall, the prop shows up in the wall's constraint network (NoCollide registers
-    -- there), which would make eligible()'s contraption check falsely reject the
-    -- re-arm. Checking armed first means eligible() only runs on the clean network
-    -- at the first arm, so its contraption guard stays correct.
+    -- Already-armed check BEFORE eligible(): the NoCollide registers the prop in
+    -- the wall's constraint network, which would fail eligible()'s contraption
+    -- guard on re-arm. Checking armed first keeps that guard on the clean network.
     local recs = wp.nocollide[ent]
     if recs and recs[portal] then return end
     if not eligible(ent, portal) then return end
@@ -155,12 +118,9 @@ function wp.ArmNoCollide(portal, ent)
     recs[portal] = { constraints = cons }
 end
 
--- Restore collision for the pairs a rec disabled. CRITICAL: removing a
--- logic_collision_pair does NOT re-enable collision -- the VPhysics pair-disable
--- persists, so a bare :Remove() silently leaves the entities ghosting forever.
--- Firing EnableCollisions restores it, and the enable sticks once the pair is
--- removed; we remove it the next frame (removing it the same frame drops the
--- still-queued input before it processes).
+-- Restore collision. CRITICAL: removing a logic_collision_pair does NOT re-enable
+-- collision (a bare :Remove() ghosts the pair forever) — fire EnableCollisions,
+-- then remove next frame (same-frame removal drops the queued input).
 local function releaseConstraints(rec)
     for _, c in ipairs(rec.constraints) do
         if IsValid(c) then
@@ -221,10 +181,8 @@ hook.Add("PostCleanupMap", "WorldPortals_Collision", function()
     wp.nocollide = {}
 end)
 
--- Safety net: disarm anything that has gone invalid or drifted well away from its
--- portal, in case an EndTouch was ever missed. Low frequency, and only iterates the
--- (few) currently-armed entries -- NOT a world scan. This is what would have caught
--- the runaway accumulation before it ghosted the whole structure.
+-- Safety net: disarm anything gone invalid or drifted from its portal, in case an
+-- EndTouch was missed. Only iterates the few armed entries, not a world scan.
 timer.Create("WorldPortals_CollisionSweep", 2, 0, function()
     local stale
     for ent, recs in pairs(wp.nocollide) do

@@ -57,21 +57,16 @@ function ENT:KeyValue( key, value )
     end
 end
 
--- Teleportation. Players are handled by the predicted SetupMove path in
--- sh_teleport.lua so the local view stays in lockstep with the server; Touch
--- only handles non-player entities (props, NPCs, ragdolls), which can't be
--- client-predicted anyway.
+-- Teleportation for non-player entities (props/NPCs/ragdolls) only — players go
+-- through the predicted SetupMove path in sh_teleport.lua.
 function ENT:Touch( ent )
     if (not self:GetOpen()) or (not self:GetEnableTeleport()) then return end
     if ent:IsPlayer() then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
 
-    -- Self-exclusion / consumer veto: the SAME gate the teleport uses.
-    -- ShouldTeleportPortal rejects the consumer's own parts (e.g. ent.TardisPart)
-    -- and a closed door, so this single check stops the pass-through no-collide
-    -- from ever grabbing the structure the portal is built into, or firing while
-    -- the door is shut -- the bugs that let props phase through the shell.
+    -- Consumer veto (same gate as the teleport): also stops the pass-through
+    -- no-collide grabbing the structure the portal is built into.
     if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
 
     -- Don't teleport/phase an entity rigidly attached to the contraption this portal
@@ -83,13 +78,9 @@ function ENT:Touch( ent )
         end
     end
 
-    -- Pass the prop through the wall while it transits, in ANY direction. This used to
-    -- be gated on "moving toward the portal", which made it unreliable for a prop the
-    -- player pushes/drags/rotates by hand (a held prop's velocity wanders, so it kept
-    -- jamming on the wall). Instead arm whenever the prop is genuinely DYNAMIC -- moving
-    -- or physgun-held -- so a static structure prop merely overlapping the trigger
-    -- (~zero velocity, not held) is still excluded, with wp-shouldtp above as the real
-    -- structure guard. Idempotent; disarmed in EndTouch.
+    -- Arm the wall pass-through for any DYNAMIC prop (moving or physgun-held), in
+    -- any direction — a held prop's velocity wanders, so gating on "moving toward"
+    -- kept jamming it. Static props are excluded; wp-shouldtp is the structure guard.
     local entphys = ent:GetPhysicsObject()
     if (IsValid(entphys) and entphys:GetVelocity():LengthSqr() > 25) or ent:IsPlayerHolding() then
         wp.ArmNoCollide(self, ent)
@@ -158,11 +149,9 @@ function ENT:EndTouch( ent )
     wp.DisarmNoCollide( ent, self )
 end
 
--- Collision frame: a child linked_portal_frame entity carrying a perimeter-frame
--- physics hull (props only) at the opening, so a prop transiting the portal is
--- funnelled through the hole while sv_collision.lua no-collides it with the wall.
--- Created once here; rebuilt from the Width/Height/Thickness NetworkVarNotifies in
--- shared.lua when the opening resizes.
+-- Create/destroy the portal's linked_portal_frame child (a perimeter physics hull
+-- that funnels transiting props through the opening). Resized from the size
+-- NetworkVarNotifies in shared.lua.
 function ENT:RebuildCollisionFrame()
     local w, h = self:GetWidth(), self:GetHeight()
     if w <= 0 or h <= 0 then
@@ -180,12 +169,10 @@ function ENT:RebuildCollisionFrame()
         f:SetPos(self:GetPos())
         f:SetAngles(self:GetAngles())
         f:Spawn()
-        -- Deliberately NOT parented. A parented frame would sit under this portal's
-        -- parent (the TARDIS shell), and the prop<->shell no-collide applied during
-        -- transit disables the prop against ALL of the shell's parented descendants
-        -- -- so the prop would phase the frame the moment it armed. The frame tracks
-        -- the portal via its own Think (reads .Portal) instead. WPPortal networks the
-        -- reference for the client debug overlay.
+        -- Deliberately NOT parented: the prop<->shell no-collide would disable the
+        -- prop against all of the shell's parented descendants, so a parented frame
+        -- would be phased too. It tracks the portal via its own Think (.Portal);
+        -- WPPortal networks the reference for the client debug overlay.
         f.Portal = self
         f:SetNWEntity("WPPortal", self)
         self.CollisionFrame = f
