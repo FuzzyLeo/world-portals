@@ -64,7 +64,7 @@ end
 local ANGLE_ZERO = Angle()
 
 -- The transform the original is actually RENDERED at — glues the ghost to the
--- visible prop. GetRenderOrigin/Angles picks up cl_init.lua's rapid-loop render-
+-- visible prop. GetRenderOrigin/Angles picks up cl_renderfollow.lua's render-
 -- follow when active; nil falls back to GetPos/GetAngles.
 local function renderTransform(ent)
     return ent:GetRenderOrigin() or ent:GetPos(), ent:GetRenderAngles() or ent:GetAngles()
@@ -603,8 +603,8 @@ hook.Add("EntityRemoved", "WorldPortals_Ghosts", function(ent)
     end
 end)
 
--- Authoritative ghost pose, after every Think (so cl_init.lua's render-follow has
--- finalized the original's transform) and right before the scene draws — keeps
+-- Authoritative ghost pose, after every Think (so cl_renderfollow.lua's render-follow
+-- has finalized the original's transform) and right before the scene draws — keeps
 -- the ghost glued even at extreme loop speeds.
 hook.Add("PreDrawOpaqueRenderables", "WorldPortals_GhostPose", function(_, skybox)
     if skybox then return end
