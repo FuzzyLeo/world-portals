@@ -7,7 +7,7 @@
 --
 -- Rigid props pose via SetPos/SetAngles; skeletal entities (ragdolls/NPCs/
 -- players, incl. the local player) pose bone-by-bone (copyBonesThroughPortal),
--- with a held weapon mirrored as a second sub-ghost. See CLAUDE.md for the design.
+-- with a held weapon mirrored as a second sub-ghost.
 
 local ENABLE_DEFAULT = "1"
 -- Hold the ConVar objects (read on the per-frame Think); GetConVar's hash lookup
@@ -274,7 +274,7 @@ end
 -- Let a consumer veto drawing this ghost in the current pass — for an exit in a
 -- region hidden from the open world (a TARDIS interior in the skybox), it must
 -- draw only in that region's portal RT, not the main scene. Per-draw, NOT cached
--- (the answer differs between passes within one frame). See CLAUDE.md.
+-- (the answer differs between passes within one frame).
 local function ghostDrawVetoed(rec, ghostEnt)
     return hook.Call("wp-shouldghostdraw", GAMEMODE, rec.ent, ghostEnt, rec.portal, rec.exit) == false
 end

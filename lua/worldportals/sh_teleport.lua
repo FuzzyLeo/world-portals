@@ -1,7 +1,7 @@
 
 -- Predicted player teleport (SetupMove): server for everyone, client for
 -- LocalPlayer, so the local view stays in lockstep without the snapshot.
--- Non-player entities go through ENT:Touch. See CLAUDE.md for the full flow.
+-- Non-player entities go through ENT:Touch.
 local ANGLE_VR_YAW_REF = Angle(0, 0, 0)
 -- Slack in front of the plane that still fires this tick — catches a slow
 -- creeper whose next, accelerated tick would step over the plane.
@@ -70,7 +70,6 @@ local function predictPlayerTeleport(ply, mv, cmd)
         local backLimit = (thickness > 0 and ply:GetMoveType() ~= MOVETYPE_NOCLIP) and -thickness or 0
         if distNow <= backLimit then goto cont end
         local distNext = (nextEyeX - pos.x) * fwd.x + (nextEyeY - pos.y) * fwd.y + (nextEyeZ - pos.z) * fwd.z
-        -- Hull centre swept the same way — the second crossing point.
         local centerNow  = (hullCenterX - pos.x) * fwd.x + (hullCenterY - pos.y) * fwd.y + (hullCenterZ - pos.z) * fwd.z
         local centerNext = (nextCenterX - pos.x) * fwd.x + (nextCenterY - pos.y) * fwd.y + (nextCenterZ - pos.z) * fwd.z
         -- "Reaches" = crosses next tick, or already within CROSS_SKIN moving

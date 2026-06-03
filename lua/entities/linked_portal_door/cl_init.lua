@@ -19,7 +19,6 @@ function ENT:DrawPortal(exitPortal)
     end
 end
 
--- Draw world portals
 function ENT:Draw()
     if not (wp.IsEnabled and wp.IsEnabled()) then return end
     if not self:GetOpen() then return end

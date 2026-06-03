@@ -5,7 +5,6 @@
 -- so it passes through; the collision frame (linked_portal_frame) keeps it
 -- funnelled through the opening. Armed from the portal's trigger Touch (event-
 -- driven, cheap). No collidable ghost — clientside can't block server props.
--- See CLAUDE.md.
 
 if not SERVER then return end
 

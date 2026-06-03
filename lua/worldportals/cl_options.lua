@@ -1,5 +1,3 @@
--- Options
-
 hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
     ---@diagnostic disable-next-line: deprecated
     spawnmenu.AddToolMenuOption("Options", "World Portals", "WorldPortals_Options", "Settings", "", "", function(panel)
@@ -23,9 +21,7 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         recursion:SetTooltip("Default: 2. Higher = portals seen through portals seen through portals... up to 9 levels.")
         panel:AddItem(recursion)
 
-        -- Inline performance warning: each recursion level re-renders every visible
-        -- portal again, so 4+ with several portals in view gets expensive fast. Show
-        -- a coloured note only while depth is 4+; hide it at 3 or under.
+        -- Show the perf warning only at depth 4+ (each level re-renders every visible portal).
         local recurseWarn = vgui.Create("DLabel")
         recurseWarn:SetText("\xE2\x9A\xA0 Depth 4+ can seriously hurt performance with multiple portals visible at once.")
         recurseWarn:SetTextColor(Color(200, 60, 20))
@@ -37,10 +33,8 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
             local show = math.floor(tonumber(value) or 0) > 3
             if recurseWarn:IsVisible() ~= show then
                 recurseWarn:SetVisible(show)
-                -- AddItem wraps each item in a DSizeToContents panel; hiding the
-                -- inner label doesn't shrink that wrapper, so the freed space
-                -- lingers. Re-fit the wrapper (collapses to 0 when hidden, grows
-                -- back when shown) before reflowing the form.
+                -- AddItem wraps each item in a DSizeToContents panel that doesn't shrink
+                -- when the inner label hides, so re-fit the wrapper before reflowing.
                 local wrap = recurseWarn:GetParent()
                 if IsValid(wrap) then wrap:InvalidateLayout(true) end
                 panel:InvalidateLayout(true)

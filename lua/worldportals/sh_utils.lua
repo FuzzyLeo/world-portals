@@ -92,11 +92,10 @@ function wp.TransformPortalPos( vec, portal, exit_portal )
 
 end
 
--- Transforms a vector (direction) through a portal pair. Same WorldToLocal ->
+-- Transforms a vector (direction) through a portal pair: same WorldToLocal ->
 -- 180-yaw mirror -> LocalToWorld pipeline as the position/angle transforms, so
--- it's a real rotation at any pitch/roll. The old `exit:GetAngles() -
--- portal:GetAngles()` Euler subtraction silently flipped velocity on floor/
--- ceiling/rolled pairs (the infinite-fall bounce).
+-- it's a real rotation at any pitch/roll (Euler-angle subtraction would flip
+-- velocity on pitched/rolled pairs).
 function wp.TransformPortalVector( vec, portal, exit_portal )
 
     -- Direction-only: zero origin so only the rotation applies. WorldToLocal

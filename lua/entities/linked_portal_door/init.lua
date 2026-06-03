@@ -10,7 +10,6 @@ AccessorFunc( ENT, "enableteleport", "EnableTeleport", FORCE_BOOL )
 util.AddNetworkString("WorldPortals_VRMod_SetAngle")
 util.AddNetworkString("WorldPortals_Teleport")
 
--- Collect properties
 function ENT:KeyValue( key, value )
     if ( key == "partnername" ) then
         self:SetPartnerName( value )
@@ -64,9 +63,6 @@ function ENT:Touch( ent )
     if ent:IsPlayer() then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
-
-    -- Consumer veto (same gate as the teleport): also stops the pass-through
-    -- no-collide grabbing the structure the portal is built into.
     if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
 
     -- Don't teleport/phase an entity rigidly attached to the contraption this portal
@@ -78,16 +74,15 @@ function ENT:Touch( ent )
         end
     end
 
-    -- Arm the wall pass-through for any DYNAMIC prop (moving or physgun-held), in
-    -- any direction — a held prop's velocity wanders, so gating on "moving toward"
-    -- kept jamming it. Static props are excluded; wp-shouldtp is the structure guard.
+    -- Arm the wall pass-through for any dynamic or physgun-held prop, in any
+    -- direction (a held prop's velocity wanders). Static props excluded; wp-shouldtp
+    -- guards the structure.
     local entphys = ent:GetPhysicsObject()
     if (IsValid(entphys) and entphys:GetVelocity():LengthSqr() > 25) or ent:IsPlayerHolding() then
         wp.ArmNoCollide(self, ent)
     end
 
-    -- Teleport only when the prop is genuinely crossing TOWARD the exit. Direction
-    -- matters here (unlike the no-collide above) so it doesn't bounce back and forth.
+    -- Teleport only when the prop is crossing toward the exit, else it ping-pongs.
     if ent:GetVelocity():GetNormalized():Dot( self:GetForward() ) >= 0 then return end
     local projected_distance = wp.DistanceToPlane( ent:EyePos(), self:GetPos(), self:GetForward() )
     if projected_distance < 0 then
@@ -142,9 +137,8 @@ function ENT:Touch( ent )
     end
 end
 
--- Restore wall collision once the prop leaves the doorway (transited through, or
--- pulled back out). On teleport the prop is moved out of this trigger, so EndTouch
--- fires here and disarms the entry side; the exit side was armed in Touch.
+-- Restore wall collision when the prop leaves the doorway. On teleport it's moved
+-- out of the trigger, so this disarms the entry side (the exit was armed in Touch).
 function ENT:EndTouch( ent )
     wp.DisarmNoCollide( ent, self )
 end

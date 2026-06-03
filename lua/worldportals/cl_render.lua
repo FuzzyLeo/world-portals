@@ -1,5 +1,4 @@
 
--- Setup variables
 wp.matBlack = Material( "wp/black" )
 wp.matTrans = Material( "wp/trans" )
 wp.matInvis = Material( "wp/invis" )
@@ -1031,9 +1030,8 @@ end )
 local cvGhostsSelf
 hook.Add( "ShouldDrawLocalPlayer", "WorldPortals_Render", function()
     if wp.drawing then
-        -- "See yourself in portals" off => don't draw the local player into any
-        -- portal's rendered view, so you never see your own body through a portal
-        -- (the ghost half is suppressed separately in cl_ghosts.lua).
+        -- "See yourself in portals" off => don't draw the local player into portal
+        -- RTs (the ghost half is suppressed separately in cl_ghosts.lua).
         cvGhostsSelf = cvGhostsSelf or GetConVar("worldportals_ghosts_self")
         if cvGhostsSelf and not cvGhostsSelf:GetBool() then return false end
         return true
