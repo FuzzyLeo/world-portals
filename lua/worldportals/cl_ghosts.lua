@@ -247,12 +247,12 @@ local function copyBonesThroughPortal(rec, src, ghost)
     ghost:SetupBones()
     local n = ghost:GetBoneCount()
     if not n or n <= 0 then return end
+    local bm = rec.boneMatrix
     for i = 0, n - 1 do
         local m = src:GetBoneMatrix(i)
         if m then
             wp.TransformPortalPosInto(rec.bonePosBuf, m:GetTranslation(), rec.portal, rec.exit)
             wp.TransformPortalAngleInto(rec.boneAngBuf, m:GetAngles(), rec.portal, rec.exit)
-            local bm = Matrix()
             bm:SetTranslation(rec.bonePosBuf)
             bm:SetAngles(rec.boneAngBuf)
             bm:SetScale(m:GetScale())
@@ -452,6 +452,7 @@ local function startStraddle(ent, portal)
         -- pose's posBuf/angBuf (different callbacks, same frame).
         bonePosBuf = Vector(),
         boneAngBuf = Angle(),
+        boneMatrix = Matrix(),
         entryNrm = Vector(),
         exitNrm = Vector(),
         entryD = 0,
