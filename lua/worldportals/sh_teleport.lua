@@ -79,13 +79,17 @@ local function predictPlayerTeleport(ply, mv, cmd)
         local centerReaches = centerNext <= 0 or centerNow <= CROSS_SKIN
         if not (eyeReaches or centerReaches) then goto cont end
 
-        -- Face bounds on the hull CENTRE, not the eye — fixes the jump-over (the
-        -- eye clears the top edge while the body still passes through).
-        local localCenter = portal:WorldToLocal(Vector(hullCenterX, hullCenterY, hullCenterZ))
+        -- Face bounds: fire if EITHER the hull centre or the eye projects inside
+        -- the opening, matching the eye-OR-centre crossing above. Centre covers
+        -- the jump-over (eye clears the top edge while the body passes through);
+        -- eye covers a portal smaller than the player mounted off-centre, where
+        -- the eye enters the hole but the centre misses the face.
         local mins, maxs = portal:GetCollisionBounds()
-        if localCenter.y < mins.y or localCenter.y > maxs.y or localCenter.z < mins.z or localCenter.z > maxs.z then
-            goto cont
-        end
+        local lc = portal:WorldToLocal(Vector(hullCenterX, hullCenterY, hullCenterZ))
+        local le = portal:WorldToLocal(eyePos)
+        local centerInFace = lc.y >= mins.y and lc.y <= maxs.y and lc.z >= mins.z and lc.z <= maxs.z
+        local eyeInFace    = le.y >= mins.y and le.y <= maxs.y and le.z >= mins.z and le.z <= maxs.z
+        if not (centerInFace or eyeInFace) then goto cont end
 
         if hook.Call("wp-shouldtp", GAMEMODE, portal, ply) == false then goto cont end
 
