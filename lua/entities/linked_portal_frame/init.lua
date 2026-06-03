@@ -57,6 +57,17 @@ function ENT:BuildFrame(width, height, thickness)
     if not IsValid(phys) then return false end
     phys:SetMass(50000)
     self:SetMoveType(MOVETYPE_NONE)
+
+    -- The new physobj defaults to colliding -- constraint.NoCollide fires its
+    -- disable once and never reapplies -- so re-add the frame<->wall no-collide
+    -- or the immovable shadow shoves the shell.
+    if self.WallNoCollides then
+        for _, c in pairs(self.WallNoCollides) do
+            if IsValid(c) then c:Remove() end
+        end
+        self.WallNoCollides = nil
+    end
+    wp.NoCollideFrame(self, self.Portal)
     return true
 end
 
