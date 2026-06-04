@@ -65,9 +65,10 @@ function ENT:Touch( ent )
     if not IsValid(exit) then return end
     if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
 
-    -- Don't teleport/phase an entity rigidly attached to the contraption this portal
-    -- rides on. EXCEPTION: one we've already armed -- our own NoCollide makes it show
-    -- up in GetAllConstrainedEntities, but it passed this check cleanly on first arm.
+    -- Don't teleport or phase a prop that's part of the contraption this portal rides
+    -- on. Skip the check for an already-armed prop: its pass-through NoCollide is
+    -- itself a constraint, so the prop self-registers in the parent's network and
+    -- would wrongly match here -- yet it armed only after passing this check clean.
     if IsValid( self:GetParent() ) and not (wp.nocollide[ent] and wp.nocollide[ent][self]) then
         for _,v in pairs( constraint.GetAllConstrainedEntities( self:GetParent() ) ) do
             if v == ent then return end
@@ -144,8 +145,7 @@ function ENT:EndTouch( ent )
 end
 
 -- Create/destroy the portal's linked_portal_frame child (a perimeter physics hull
--- that funnels transiting props through the opening). Resized from the size
--- NetworkVarNotifies in shared.lua.
+-- that funnels transiting props through the opening).
 function ENT:RebuildCollisionFrame()
     local w, h = self:GetWidth(), self:GetHeight()
     if w <= 0 or h <= 0 then
@@ -163,8 +163,8 @@ function ENT:RebuildCollisionFrame()
         f:SetPos(self:GetPos())
         f:SetAngles(self:GetAngles())
         f:Spawn()
-        -- Deliberately NOT parented: the prop<->shell no-collide would disable the
-        -- prop against all of the shell's parented descendants, so a parented frame
+        -- Deliberately NOT parented: the prop<->wall no-collide would disable the
+        -- prop against all of the wall's parented descendants, so a parented frame
         -- would be phased too. It tracks the portal via its own Think (.Portal);
         -- WPPortal networks the reference for the client debug overlay.
         f.Portal = self
@@ -173,13 +173,13 @@ function ENT:RebuildCollisionFrame()
     end
     f:BuildFrame(w, h, self:GetThickness())
     -- No-collide the (unparented) frame with the wall it sits in NOW, before the next
-    -- physics tick, so its solid hull doesn't interpenetrate the shell and launch the
-    -- TARDIS. The frame's Think re-checks this periodically for late-parented walls.
+    -- physics tick: an overlapping solid hull would interpenetrate that wall and the
+    -- physics solver would violently shove the wall away. The frame's Think re-checks
+    -- this periodically for late-parented walls.
     wp.NoCollideFrame(f, self)
 end
 
 function ENT:OnRemove()
-    -- Parented children aren't auto-removed with the parent in GMod.
     if IsValid(self.CollisionFrame) then
         self.CollisionFrame:Remove()
     end

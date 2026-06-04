@@ -4,7 +4,7 @@ AddCSLuaFile("cl_init.lua")
 include("shared.lua")
 
 -- Per-tick portal move above which we SNAP the hull instead of sweeping it (a
--- demat/remat warp can't be swept). Mirrors ComputeShadowControl's teleportdistance.
+-- single-tick warp can't be swept). Mirrors ComputeShadowControl's teleportdistance.
 local SHADOW_TELEPORT_DIST = 128
 
 -- Eight corners of an axis-aligned box in this entity's local space.
@@ -21,12 +21,8 @@ function ENT:Initialize()
     self:SetNoDraw(true)
 end
 
--- (Re)build the perimeter-frame collision hull from the portal opening
--- dimensions. Verts are in this entity's local space; parented at the portal
--- with no offset, that equals the portal's local space: +x forward/transit,
--- y the width axis, z the height axis (matching shared.lua SetupBounds, where
--- the opening box is x in [-(5+thickness), -5], y in +-width/2, z in +-height/2).
--- Calling again replaces the previous physics object.
+-- (Re)build the collision hull from the portal opening dimensions. Calling again
+-- replaces the previous physics object.
 function ENT:BuildFrame(width, height, thickness)
     local slabs = self:FrameSlabs(width, height, thickness)
     if not slabs then
@@ -41,17 +37,14 @@ function ENT:BuildFrame(width, height, thickness)
 
     self:SetSolid(SOLID_VPHYSICS)
     self:PhysicsInitMultiConvex(meshes)
-    -- No EnableCustomCollisions: physics-vs-physics is all we need (a prop resting
-    -- on a slab); ECC is expensive and would block bullet/use traces too.
     -- COLLISION_GROUP_WEAPON hits world+props but not players, so the frame funnels
     -- props without changing player movement.
     self:SetCollisionGroup(COLLISION_GROUP_WEAPON)
 
     if not IsValid(self:GetPhysicsObject()) then return false end
     -- Drive the hull as an immovable physics SHADOW (both flags false): external
-    -- forces never displace it, yet UpdateShadow can sweep it each tick, and a SWEPT
-    -- shadow PUSHES props instead of teleporting past them. A static SetPos'd hull
-    -- flung props instead (verified A/B).
+    -- forces never displace it, yet a swept UpdateShadow each tick pushes props
+    -- along instead of teleporting past them.
     self:MakePhysicsObjectAShadow(false, false)
     local phys = self:GetPhysicsObject()
     if not IsValid(phys) then return false end
@@ -60,7 +53,7 @@ function ENT:BuildFrame(width, height, thickness)
 
     -- The new physobj defaults to colliding -- constraint.NoCollide fires its
     -- disable once and never reapplies -- so re-add the frame<->wall no-collide
-    -- or the immovable shadow shoves the shell.
+    -- or the immovable shadow shoves the wall.
     if self.WallNoCollides then
         for _, c in pairs(self.WallNoCollides) do
             if IsValid(c) then c:Remove() end
@@ -72,13 +65,12 @@ function ENT:BuildFrame(width, height, thickness)
 end
 
 -- Follow the portal WITHOUT being parented, driving both the entity transform and
--- the physics hull from here each tick. Not parented because the prop<->shell
--- no-collide would disable the prop against the shell's whole parented subtree, so
+-- the physics hull from here each tick. Not parented because the prop<->wall
+-- no-collide would disable the prop against the wall's whole parented subtree, so
 -- a parented frame would be phased the instant a prop armed (sv_collision.lua).
 function ENT:Think()
     local portal = self.Portal
     if not IsValid(portal) then
-        -- Portal gone independently of our OnRemove path; nothing to bound.
         self:Remove()
         return
     end
@@ -103,8 +95,8 @@ function ENT:Think()
         self.LastShadowTarget = pos
     end
     -- Keep the (unparented) hull no-collided with the wall it sits in, so it doesn't
-    -- interpenetrate the TARDIS shell and launch it. Low-frequency re-check picks up
-    -- the shell once the portal is parented to it and any parts added later.
+    -- interpenetrate that wall and shove it away. Low-frequency re-check picks up
+    -- the wall once the portal is parented to it and any parts added later.
     local now = CurTime()
     if not self.NextWallCheck or now >= self.NextWallCheck then
         self.NextWallCheck = now + 1

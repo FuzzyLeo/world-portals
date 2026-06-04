@@ -34,7 +34,7 @@ wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
 -- Is this an entity we render ghosts for? A NoDraw'd prop is skipped by default
 -- (hidden for a reason) but a consumer can opt it back in via wp-shouldghost
--- (Doors' cordon does, for interior props it hides only in the local realm).
+-- (e.g. a prop the consumer hides only in the local realm but still wants ghosted).
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsGhost then return false end
@@ -284,7 +284,7 @@ local function localGhostIsCutaway(rec)
 end
 
 -- Let a consumer veto drawing this ghost in the current pass — for an exit in a
--- region hidden from the open world (a TARDIS interior in the skybox), it must
+-- region hidden from the open world (e.g. an interior tucked in the skybox), it must
 -- draw only in that region's portal RT, not the main scene. Per-draw, NOT cached
 -- (the answer differs between passes within one frame).
 local function ghostDrawVetoed(rec, ghostEnt)

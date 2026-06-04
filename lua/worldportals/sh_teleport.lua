@@ -8,7 +8,7 @@ local ANGLE_VR_YAW_REF = Angle(0, 0, 0)
 -- creeper whose next, accelerated tick would step over the plane.
 local CROSS_SKIN = 2
 -- Noclip discards the mirrored exit velocity (FullNoClipMove rederives it from
--- input), so a same-facing pair (TARDIS) re-crosses and ping-pongs. Briefly
+-- input), so a same-facing pair re-crosses and ping-pongs. Briefly
 -- suppress re-fire so the view rotation can steer them clear.
 local NOCLIP_TP_COOLDOWN = 0.25
 local function predictPlayerTeleport(ply, mv, cmd)

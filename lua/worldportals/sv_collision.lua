@@ -1,8 +1,8 @@
 -- Collision
 
 -- Portal-aware collision for transiting props. A portal is usually mounted flush
--- against a solid (a TARDIS shell), so a decent-sized prop jams on that wall
--- before its centre can cross the plane. While a dynamic prop touches an open
+-- against a solid wall, so a decent-sized prop jams on it before its centre can
+-- cross the plane. While a dynamic prop touches an open
 -- teleport-enabled portal we no-collide it with the wall (constraint.NoCollide)
 -- so it passes through; the collision frame (linked_portal_frame) keeps it
 -- funnelled through the opening. Armed from the portal's trigger Touch (event-
@@ -72,7 +72,7 @@ local function gatherWalls(portal, ent)
 end
 
 -- Restore the frame<->wall no-collision the unparented frame lost (else its solid
--- hull interpenetrates the shell and the solver launches the TARDIS). Doesn't
+-- hull interpenetrates the wall and the solver shoves it away). Doesn't
 -- touch prop<->frame, so transiting props still collide with the frame.
 -- Idempotent per wall, so cheap to re-run as the wall set changes late.
 function wp.NoCollideFrame(frame, portal)
