@@ -1020,14 +1020,19 @@ hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, f
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 
--- Resolved lazily on first portal render (after cl_ghosts.lua has created it),
--- then held -- this hook fires on the per-portal RT render path, so we avoid the
--- per-frame GetConVar string lookup.
+-- While a portal's exit-view renders into its RT (wp.drawing), draw the local
+-- player's model so your body shows up in portals (e.g. a portal whose pair points
+-- back at you, or recursive views). Outside that -- the normal eye view -- this
+-- returns nil, so the engine keeps first-person bodiless as usual.
+--
+-- cvGhostsSelf ("Show yourself in portals", created in cl_ghosts.lua) is resolved
+-- on first render and held: it exists by then, and this hook runs once per portal
+-- RT, so caching it avoids the GetConVar name lookup every pass.
 local cvGhostsSelf
 hook.Add( "ShouldDrawLocalPlayer", "WorldPortals_Render", function()
     if wp.drawing then
-        -- "See yourself in portals" off => don't draw the local player into portal
-        -- RTs (the ghost half is suppressed separately in cl_ghosts.lua).
+        -- Toggle off => keep yourself out of portal RTs. (The mid-teleport ghost
+        -- half is gated by this same convar, separately, in cl_ghosts.lua.)
         cvGhostsSelf = cvGhostsSelf or GetConVar("worldportals_ghosts_self")
         if cvGhostsSelf and not cvGhostsSelf:GetBool() then return false end
         return true

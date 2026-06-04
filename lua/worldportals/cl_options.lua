@@ -12,7 +12,7 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         local enabled = vgui.Create("DCheckBoxLabel")
         enabled:SetText("Enable portals")
         enabled:SetConVar("worldportals_enabled")
-        enabled:SetTooltip("When off, portals don't render and entity Draw bails. Saves the per-frame engine RenderView allocations the recursion produces.")
+        enabled:SetTooltip("Disables portal rendering entirely, all portals will show blank")
         panel:AddItem(enabled)
 
         local recursion = vgui.Create("DNumSlider")
@@ -20,10 +20,9 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         recursion:SetMinMax(1, 9)
         recursion:SetDecimals(0)
         recursion:SetConVar("worldportals_recurse_depth")
-        recursion:SetTooltip("Default: 2. Higher = portals seen through portals seen through portals... up to 9 levels.")
+        recursion:SetTooltip("Default: 2. Portals can show in other portals up to the selected depth. Use caution with higher values as this may have a major performance impact")
         panel:AddItem(recursion)
 
-        -- Show the perf warning only at depth 4+ (each level re-renders every visible portal).
         local recurseWarn = vgui.Create("DLabel")
         recurseWarn:SetText("\xE2\x9A\xA0 Depth 4+ can seriously hurt performance with multiple portals visible at once.")
         recurseWarn:SetTextColor(Color(200, 60, 20))
@@ -35,8 +34,7 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
             local show = math.floor(tonumber(value) or 0) > 3
             if recurseWarn:IsVisible() ~= show then
                 recurseWarn:SetVisible(show)
-                -- AddItem wraps each item in a DSizeToContents panel that doesn't shrink
-                -- when the inner label hides, so re-fit the wrapper before reflowing.
+                -- Reflow the layout to account for the label appearing/disappearing.
                 local wrap = recurseWarn:GetParent()
                 if IsValid(wrap) then wrap:InvalidateLayout(true) end
                 panel:InvalidateLayout(true)
@@ -50,13 +48,13 @@ hook.Add("PopulateToolMenu", "WorldPortals_PopulateToolMenu", function()
         local ghosts = vgui.Create("DCheckBoxLabel")
         ghosts:SetText("Entity Ghosts")
         ghosts:SetConVar("worldportals_ghosts")
-        ghosts:SetTooltip("While something is mid-teleport, show its emerging half coming out the other portal so it looks like one whole body crossing through, instead of being cut off at the opening. Works for players, NPCs, ragdolls and props.")
+        ghosts:SetTooltip("Shows the other side of entities halfway through portals and cuts them off from the entry side")
         panel:AddItem(ghosts)
 
         local selfGhost = vgui.Create("DCheckBoxLabel")
-        selfGhost:SetText("See yourself in portals")
+        selfGhost:SetText("Show yourself in portals")
         selfGhost:SetConVar("worldportals_ghosts_self")
-        selfGhost:SetTooltip("Show your own body in portals: your reflection seen looking through a portal, plus the 'ghost' half that completes your body while you're mid-teleport (in third-person and recursive views). Turn off to never see yourself in any portal.")
+        selfGhost:SetTooltip("Shows your own playermodel in portals when enabled")
         panel:AddItem(selfGhost)
 
         local debugMode = vgui.Create("DComboBox")

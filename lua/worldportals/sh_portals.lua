@@ -1,11 +1,5 @@
 -- Portals
 
--- Maintained registry of every linked_portal_door, so the hot paths (the
--- predicted SetupMove scan, trace redirection, the render loop) iterate a cached
--- list instead of ents.FindByClass every tick/frame. Portals register from their
--- shared Initialize; EntityRemoved deregisters. Each change rebuilds wp.portals
--- as a fresh array (never mutated in place) so a reference held across iteration
--- stays stable even if a portal is removed mid-loop.
 wp.portals = wp.portals or {}
 
 local registered = {}
@@ -34,8 +28,6 @@ hook.Add("EntityRemoved", "WorldPortals_Portals", function(ent)
     if registered[ent] then wp.UnregisterPortal(ent) end
 end)
 
--- Re-discover live portals when this file hot-reloads: their Initialize already
--- ran, so they'd never re-register and the list would be empty until a respawn.
 for _, portal in ipairs(ents.FindByClass("linked_portal_door")) do
     registered[portal] = true
 end
