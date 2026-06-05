@@ -120,9 +120,7 @@ function wp.ArmNoCollide(portal, ent)
     recs[portal] = { constraints = cons }
 end
 
--- Restore collision by removing each pair. They're created with disable_on_remove,
--- so :Remove() re-enables the collision the pair was suppressing -- no
--- EnableCollisions input or deferral needed.
+-- Restore collision by removing each pair.
 local function releaseConstraints(rec)
     for _, c in ipairs(rec.constraints) do
         if IsValid(c) then c:Remove() end
@@ -171,12 +169,11 @@ end
 hook.Add("EntityRemoved", "WorldPortals_Collision", function(ent)
     -- The removed entity itself was being passed through something.
     if wp.nocollide[ent] then wp.DisarmAllNoCollide(ent) end
-    -- ...or it was a portal something was armed against (harmless otherwise).
-    wp.DisarmPortal(ent)
+    -- The removed entity was a portal -- disarm everything passing through it.
+    if ent:GetClass() == "linked_portal_door" then wp.DisarmPortal(ent) end
 end)
 
 hook.Add("PostCleanupMap", "WorldPortals_Collision", function()
-    -- Entities (and their constraints) are gone; just drop our bookkeeping.
     wp.nocollide = {}
 end)
 
