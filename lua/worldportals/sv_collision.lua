@@ -7,8 +7,7 @@
 -- prop touches an open teleport-enabled portal we no-collide it with the parent's
 -- solids (constraint.NoCollide) so it passes through; the collision frame
 -- (linked_portal_frame) keeps it funnelled through the opening. Armed from the
--- portal's trigger Touch (event-driven, cheap). No collidable ghost — clientside
--- can't block server props.
+-- portal's trigger Touch (event-driven, cheap).
 
 if not SERVER then return end
 
@@ -34,7 +33,7 @@ local function eligible(ent, portal)
     return true
 end
 
--- Solid entities a transiting prop passes through: the portal's parent +
+-- What a transiting prop may phase through: the portal's parent +
 -- constraint network + whatever wp-nocollide returns, but only those that opt in
 -- with `ent.PortalNoCollide == true`. Opt-in (default-solid) is deliberate — a
 -- missed flag just jams the prop (recoverable), never drops it into the void.
@@ -73,10 +72,10 @@ local function gatherParentSolids(portal, ent)
     return solids
 end
 
--- Restore the frame<->parent no-collision the unparented frame lost (else its solid
--- hull interpenetrates the parent and the solver shoves it away). Doesn't touch
--- prop<->frame, so transiting props still collide with the frame. Idempotent, so
--- cheap to re-run as the parent changes late.
+-- The frame's solid hull overlaps the parent (both occupy the doorway), so without a
+-- no-collide between them the physics solver shoves the parent away. Maintain that
+-- frame<->parent no-collide. Idempotent, so safe to re-run -- BuildFrame recreates the
+-- physobj and orphans the old one, and the parent can appear late.
 function wp.NoCollideFrame(frame, portal)
     if not (IsValid(frame) and IsValid(portal)) then return end
     -- ONLY the portal's parent: Source propagates the NoCollide down its whole
@@ -95,14 +94,14 @@ function wp.NoCollideFrame(frame, portal)
     end
 end
 
--- Pass `ent` through `portal`'s parent solids. Idempotent: a no-op if the
+-- Arm the pass-through for `ent`: no-collide it with the portal's parent solids so
+-- it phases through instead of jamming on the parent. Idempotent -- a no-op if the
 -- pair is already armed, so it's safe to call every Touch tick.
 function wp.ArmNoCollide(portal, ent)
     if not (IsValid(portal) and IsValid(ent)) then return end
 
-    -- Already-armed check BEFORE eligible(): the NoCollide registers the prop in
-    -- the parent's constraint network, which would fail eligible()'s contraption
-    -- guard on re-arm. Checking armed first keeps that guard on the clean network.
+    -- Check already-armed before eligible(): a no-collide counts as a constraint, so
+    -- an armed prop would fail eligible() on re-arm.
     local recs = wp.nocollide[ent]
     if recs and recs[portal] then return end
     if not eligible(ent, portal) then return end
