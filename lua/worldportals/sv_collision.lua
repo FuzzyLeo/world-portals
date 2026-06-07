@@ -177,28 +177,21 @@ hook.Add("PostCleanupMap", "WorldPortals_Collision", function()
     wp.nocollide = {}
 end)
 
--- Safety net: disarm anything gone invalid or drifted from its portal, in case an
--- EndTouch was missed. Only iterates the few armed entries, not a world scan.
-timer.Create("WorldPortals_CollisionSweep", 2, 0, function()
-    local stale
+-- A sleeping prop isn't re-tested by triggers, so a portal moving out from under one
+-- never fires its EndTouch and the no-collide would linger. Wake an armed prop when
+-- its portal moves; the trigger then re-evaluates and EndTouch disarms it once clear.
+hook.Add("Tick", "WorldPortals_CollisionWake", function()
+    if not next(wp.nocollide) then return end
     for ent, recs in pairs(wp.nocollide) do
-        for portal in pairs(recs) do
-            local drop = not IsValid(ent) or not IsValid(portal)
-            if not drop then
-                local center = ent:LocalToWorld(ent:OBBCenter())
-                if center:Distance(portal:GetPos()) > portal:BoundingRadius() + 256 then
-                    drop = true
+        local phys = IsValid(ent) and ent:GetPhysicsObject()
+        for portal, rec in pairs(recs) do
+            if IsValid(portal) then
+                local pos = portal:GetPos()
+                if rec.lastPos and rec.lastPos ~= pos and IsValid(phys) and phys:IsAsleep() then
+                    phys:Wake()
                 end
+                rec.lastPos = pos
             end
-            if drop then
-                stale = stale or {}
-                stale[#stale + 1] = { ent, portal }
-            end
-        end
-    end
-    if stale then
-        for _, s in ipairs(stale) do
-            wp.DisarmNoCollide(s[1], s[2])
         end
     end
 end)
