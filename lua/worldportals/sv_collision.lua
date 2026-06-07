@@ -11,7 +11,7 @@
 
 if not SERVER then return end
 
-wp.nocollide = wp.nocollide or {}   -- [ent] = { [portal] = { constraints = {} } }
+wp.nocollide = wp.nocollide or {}   -- [ent] = { [portal] = { constraints = {}, lastPos = Vector } }
 
 -- Is ent something we should pass through the parent for this portal?
 local function eligible(ent, portal)
