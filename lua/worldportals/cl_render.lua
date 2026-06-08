@@ -1024,17 +1024,12 @@ end )
 -- player's model so your body shows up in portals (e.g. a portal whose pair points
 -- back at you, or recursive views). Outside that -- the normal eye view -- this
 -- returns nil, so the engine keeps first-person bodiless as usual.
---
--- cvGhostsSelf ("Show yourself in portals", created in cl_ghosts.lua) is resolved
--- on first render and held: it exists by then, and this hook runs once per portal
--- RT, so caching it avoids the GetConVar name lookup every pass.
-local cvGhostsSelf
+local cvShowSelf = CreateClientConVar("worldportals_show_self", "1", true, false, "Show your own body inside portals", 0, 1)
 hook.Add( "ShouldDrawLocalPlayer", "WorldPortals_Render", function()
     if wp.drawing then
         -- Toggle off => keep yourself out of portal RTs. (The mid-teleport ghost
         -- half is gated by this same convar, separately, in cl_ghosts.lua.)
-        cvGhostsSelf = cvGhostsSelf or GetConVar("worldportals_ghosts_self")
-        if cvGhostsSelf and not cvGhostsSelf:GetBool() then return false end
+        if not cvShowSelf:GetBool() then return false end
         return true
     end
 end )

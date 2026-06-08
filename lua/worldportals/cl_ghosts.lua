@@ -10,13 +10,12 @@
 
 local ENABLE_DEFAULT = "1"
 local cvGhosts = CreateClientConVar("worldportals_ghosts", ENABLE_DEFAULT, true, false,
-    "World Portals - render continuous clipped ghosts of entities straddling a portal", 0, 1)
+    "Render props through portals as they are passing through them", 0, 1)
 
--- Opt-out for seeing your OWN body in portals: skips the local player as a ghost
--- candidate here, and gates cl_render.lua's ShouldDrawLocalPlayer (no reflection
--- through a portal either). Remote players/NPCs/props stay on worldportals_ghosts.
-local cvGhostsSelf = CreateClientConVar("worldportals_ghosts_self", "1", true, false,
-    "World Portals - show your own body in portals (your reflection through a portal + the ghost half while mid-teleport)", 0, 1)
+-- worldportals_show_self (own body in portals) is created in cl_render.lua, which
+-- loads after this file -- resolve + cache it lazily rather than holding the
+-- create-return here.
+local cvShowSelf
 
 local GHOST_GRACE   = 0.1   -- seconds to keep a ghost alive after the straddle test drops out (anti-flicker)
 local OPENING_SLACK = 8     -- units of slack on the portal opening (width/height) test
@@ -33,8 +32,9 @@ wp.ghosts = wp.ghosts or {}   -- [entity] = record
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsGhost then return false end
-    if ent == LocalPlayer() and not cvGhostsSelf:GetBool() then
-        return false
+    if ent == LocalPlayer() then
+        cvShowSelf = cvShowSelf or GetConVar("worldportals_show_self")
+        if cvShowSelf and not cvShowSelf:GetBool() then return false end
     end
     -- A dead player's entity lingers running its move anim (the visible body is
     -- the ragdoll), so ghosting it draws a phantom over the corpse. The ragdoll
