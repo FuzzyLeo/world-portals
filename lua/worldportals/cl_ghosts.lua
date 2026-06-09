@@ -8,13 +8,10 @@
 -- props pose via SetPos/SetAngles; skeletal entities (ragdolls/NPCs/players)
 -- pose bone-by-bone.
 
-local ENABLE_DEFAULT = "1"
-local cvGhosts = CreateClientConVar("worldportals_ghosts", ENABLE_DEFAULT, true, false,
+local cvGhosts = CreateClientConVar("worldportals_ghosts", "1", true, false,
     "Render props through portals as they are passing through them", 0, 1)
 
--- worldportals_show_self (own body in portals) is created in cl_render.lua, which
--- loads after this file -- resolve + cache it lazily rather than holding the
--- create-return here.
+-- worldportals_show_self convar (created in cl_render.lua), resolved lazily.
 local cvShowSelf
 
 local GHOST_GRACE   = 0.1   -- seconds to keep a ghost alive after the straddle test drops out (anti-flicker)
@@ -26,9 +23,6 @@ local FACE_OFFSET   = 5
 
 wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
--- A NoDraw'd prop is skipped by default (hidden for a reason) but a consumer can
--- opt it back in via wp-shouldghost (e.g. a prop the consumer hides only in the
--- local realm but still wants ghosted).
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsGhost then return false end
@@ -42,6 +36,9 @@ local function isCandidate(ent)
     if ent:IsPlayer() and not ent:Alive() then return false end
     if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll()
         and not ent:IsNPC() and not ent:IsPlayer() then return false end
+    -- A NoDraw'd prop is skipped by default (hidden for a reason) but a consumer can
+    -- opt it back in via wp-shouldghost (e.g. a prop the consumer hides only in the
+    -- local realm but still wants ghosted).
     if ent:GetNoDraw() then
         return hook.Call("wp-shouldghost", GAMEMODE, ent) == true
     end
@@ -56,9 +53,6 @@ end
 
 local ANGLE_ZERO = Angle()
 
--- GetRenderOrigin/Angles picks up cl_renderfollow.lua's render-follow when active
--- (gluing the ghost to where the prop actually draws); nil falls back to
--- GetPos/GetAngles.
 local function renderTransform(ent)
     return ent:GetRenderOrigin() or ent:GetPos(), ent:GetRenderAngles() or ent:GetAngles()
 end
@@ -83,20 +77,18 @@ local OBB_EDGES = {
     {1, 3}, {2, 4}, {5, 7}, {6, 8},  -- y
     {1, 2}, {3, 4}, {5, 6}, {7, 8},  -- z
 }
--- Reused scratch: the 8 OBB corners in portal-local space (zero-seeded so the
--- analyzer infers number[]).
+-- Reused scratch: the 8 OBB corners in portal-local space.
 local sCX = {0, 0, 0, 0, 0, 0, 0, 0}
 local sCY = {0, 0, 0, 0, 0, 0, 0, 0}
 local sCZ = {0, 0, 0, 0, 0, 0, 0, 0}
 
--- Does ent's bounds cross portal's plane within the opening? Conservative (a
--- near-miss just makes a fully-clipped, invisible ghost). Cheap test: OBB centre
--- projects inside the opening. Robust test: clip the 12 OBB edges to the plane
--- and check the crossings — catches long/off-axis props whose centre is far out.
+-- Does ent's bounds cross the portal plane within the opening? Conservative -- a
+-- near-miss just makes a fully-clipped, invisible ghost.
 local function straddles(ent, portal)
     local pos = portal:GetPos()
     local fwd = portal:GetForward()
     local center = renderCenter(ent)
+    -- Cheap reject: bounds too far from the plane to reach it.
     local d = fwd.x * (center.x - pos.x) + fwd.y * (center.y - pos.y) + fwd.z * (center.z - pos.z)
     if math.abs(d) >= ent:BoundingRadius() then return false end
 
@@ -104,11 +96,14 @@ local function straddles(ent, portal)
     local y0, y1 = mins.y - OPENING_SLACK, maxs.y + OPENING_SLACK
     local z0, z1 = mins.z - OPENING_SLACK, maxs.z + OPENING_SLACK
 
+    -- Cheap path: the OBB centre projects inside the opening.
     local lc = portal:WorldToLocal(center)
     if lc.y >= y0 and lc.y <= y1 and lc.z >= z0 and lc.z <= z1 then
         return true
     end
 
+    -- Robust path (long/off-axis props whose centre missed): build the 8 OBB
+    -- corners in portal-local space, then clip each edge to the plane below.
     local rpos, rang = renderTransform(ent)
     local mn, mx = ent:OBBMins(), ent:OBBMaxs()
     local i = 0
@@ -124,6 +119,8 @@ local function straddles(ent, portal)
             end
         end
     end
+    -- An edge with endpoints on opposite sides of the plane (x sign flip) crosses
+    -- it; test where that crossing lands against the opening.
     for _, edge in ipairs(OBB_EDGES) do
         local a, b = edge[1], edge[2]
         local ax = sCX[a] --[[@as number]]
@@ -142,14 +139,16 @@ local function straddles(ent, portal)
     return false
 end
 
--- Seam offset = FACE_OFFSET + max(0, thickness): a thick portal is a tunnel of
--- depth `thickness`, so the seam sits on its BACK face or the interior shows
--- through the doorway depth. max(0,...) guards the negative thickness some thin
--- portals report.
+-- Seam offset = FACE_OFFSET + thickness: a thick portal is a tunnel of depth
+-- `thickness`, so the seam sits on its back face, else the doorway depth shows
+-- through.
 local function faceOffset(portal)
-    return FACE_OFFSET + math.max(0, portal:GetThickness())
+    return FACE_OFFSET + portal:GetThickness()
 end
 
+-- Recompute the entry/exit clip planes (n . p = D) the halves are sliced on, each
+-- at its portal's visible face; the exit folds in its pos/ang offsets so an offset
+-- or relinked pair still seams cleanly.
 local function updatePlanes(rec)
     local portal, exit = rec.portal, rec.exit
 
@@ -165,6 +164,7 @@ local function updatePlanes(rec)
     if xao.p ~= 0 or xao.y ~= 0 or xao.r ~= 0 then
         xfwd:Rotate(xao)
     end
+    -- ExitPosOffset is defined in the parent's local space -- rotate it to world.
     local xpo = exit:GetExitPosOffset()
     local xparent = exit:GetParent()
     if IsValid(xparent) then
@@ -208,9 +208,8 @@ local function syncAppearance(rec)
     end
 end
 
--- Forward the studio render flags to DrawModel and any chained override: one
--- that reads flags (e.g. the prop-spawn materialize effect) errors on nil flags,
--- and the error would escape our clip-plane push and leak it for the frame.
+-- Forward the studio render flags to DrawModel and any chained override (e.g. the
+-- prop-spawn materialize effect reads them).
 local function makeOriginalOverride(rec)
     return function(self, flags)
         local oldEC = render.EnableClipping(true)
