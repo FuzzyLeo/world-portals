@@ -33,40 +33,19 @@ local function eligible(ent, portal)
     return true
 end
 
--- What a transiting prop may phase through: the portal's parent +
--- constraint network + whatever wp-nocollide returns, but only those that opt in
--- with `ent.PortalNoCollide == true`. Opt-in (default-solid) is deliberate - a
--- missed flag just jams the prop (recoverable), never drops it into the void.
--- Never the portal/frame/prop, and only entities with a physics object.
-local function gatherParentSolids(portal, ent)
-    local solids, seen = {}, {}
-    local function consider(e)
-        if not IsValid(e) or seen[e] then return end
-        if e == ent or e.WPIsGhost then return end
-        local cls = e:GetClass()
-        if cls == "linked_portal_door" or cls == "linked_portal_frame" then return end
-        seen[e] = true
-        if e.PortalNoCollide == true and IsValid(e:GetPhysicsObject()) then
-            solids[#solids + 1] = e
-        end
-        -- recurse children regardless: a child may opt in even if the parent didn't
-        for _, c in ipairs(e:GetChildren()) do
-            consider(c)
-        end
-    end
-
-    local parent = portal:GetParent()
-    if IsValid(parent) then
-        consider(parent)
-        for _, v in pairs(constraint.GetAllConstrainedEntities(parent) or {}) do
-            consider(v)
-        end
-    end
-
+-- The solids a transiting prop may phase, from the wp-nocollide hook - a consumer's
+-- structure isn't always engine-parented to the portal, so we can't discover it.
+local function gatherPhaseSolids(portal, ent)
     local extra = hook.Call("wp-nocollide", GAMEMODE, portal, ent)
-    if istable(extra) then
-        for _, e in ipairs(extra) do
-            consider(e)
+    if not istable(extra) then return {} end
+    local solids, seen = {}, {}
+    for _, e in ipairs(extra) do
+        if IsValid(e) and not seen[e] and e ~= ent and not e.WPIsGhost then
+            local cls = e:GetClass()
+            if cls ~= "linked_portal_door" and cls ~= "linked_portal_frame" and IsValid(e:GetPhysicsObject()) then
+                seen[e] = true
+                solids[#solids + 1] = e
+            end
         end
     end
     return solids
@@ -94,8 +73,8 @@ function wp.NoCollideFrame(frame, portal)
     end
 end
 
--- Arm the pass-through for `ent`: no-collide it with the portal's parent solids so
--- it phases through instead of jamming on the parent. Idempotent - a no-op if the
+-- Arm the pass-through for `ent`: no-collide it with the solids wp-nocollide names so
+-- it phases through instead of jamming on the structure. Idempotent - a no-op if the
 -- pair is already armed, so it's safe to call every Touch tick.
 function wp.ArmNoCollide(portal, ent)
     if not (IsValid(portal) and IsValid(ent)) then return end
@@ -111,7 +90,7 @@ function wp.ArmNoCollide(portal, ent)
     end
 
     local cons = {}
-    for _, s in ipairs(gatherParentSolids(portal, ent)) do
+    for _, s in ipairs(gatherPhaseSolids(portal, ent)) do
         local c = constraint.NoCollide(ent, s, 0, 0, true)
         if IsValid(c) then
             cons[#cons + 1] = c
