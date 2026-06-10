@@ -23,6 +23,12 @@ local FACE_OFFSET   = 5
 
 wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
+-- True while ent has a live ghost (it's straddling a portal). A consumer that also
+-- drives the entity's RenderOverride uses this to yield the slot while we own it.
+function wp.IsGhosting(ent)
+    return wp.ghosts[ent] ~= nil
+end
+
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
     if ent.WPIsGhost then return false end
@@ -36,12 +42,9 @@ local function isCandidate(ent)
     if ent:IsPlayer() and not ent:Alive() then return false end
     if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll()
         and not ent:IsNPC() and not ent:IsPlayer() then return false end
-    -- A NoDraw'd prop is skipped by default (hidden for a reason) but a consumer can
-    -- opt it back in via wp-shouldghost (e.g. a prop the consumer hides only in the
-    -- local realm but still wants ghosted).
-    if ent:GetNoDraw() then
-        return hook.Call("wp-shouldghost", GAMEMODE, ent) == true
-    end
+    -- A NoDraw'd prop is hidden for a reason; ghosting it would show a bodiless
+    -- emerged half, so skip it.
+    if ent:GetNoDraw() then return false end
     return true
 end
 
