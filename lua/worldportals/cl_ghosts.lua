@@ -23,8 +23,7 @@ local FACE_OFFSET   = 5
 
 wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
--- True while ent has a live ghost (it's straddling a portal). A consumer that also
--- drives the entity's RenderOverride uses this to yield the slot while we own it.
+-- Lets a consumer that also drives ent's RenderOverride yield to us while we ghost it.
 function wp.IsGhosting(ent)
     return wp.ghosts[ent] ~= nil
 end
@@ -42,8 +41,6 @@ local function isCandidate(ent)
     if ent:IsPlayer() and not ent:Alive() then return false end
     if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll()
         and not ent:IsNPC() and not ent:IsPlayer() then return false end
-    -- A NoDraw'd prop is hidden for a reason; ghosting it would show a bodiless
-    -- emerged half, so skip it.
     if ent:GetNoDraw() then return false end
     return true
 end
