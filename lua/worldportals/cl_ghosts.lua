@@ -285,8 +285,17 @@ local function makeGhostOverride(rec)
     return function(self, flags)
         local ent = rec.ent
         if not IsValid(ent) then return end
+        -- The shadow-depth pass (projected textures, e.g. a lamp) calls this override
+        -- too; drawing there casts a ghost shadow that DrawShadow(false) can't stop - it
+        -- doesn't gate a manual DrawModel. Skip the pass so the ghost stays shadowless.
+        if bit.band(flags, STUDIO_SHADOWDEPTHTEXTURE) ~= 0 then return end
         if localGhostIsCutaway(rec) then return end
         if ghostDrawVetoed(rec, self) then return end
+        -- Past GHOST_GRACE the throttled (25Hz) scan hasn't removed this ghost yet, but you
+        -- may have moved far enough that the source is no longer force-drawn in the recursion
+        -- - its bones then read as the bind pose and a skeletal ghost copies a T-pose on the
+        -- way out. Stop drawing at the same threshold the scan removes on.
+        if SysTime() - rec.lastSeen > GHOST_GRACE then return end
         -- Pose + exit clip plane are recomputed here, at the draw: the ghost only renders
         -- in the portal RT passes (world-portals draws portals under VIEW_3DSKY), so
         -- computing them at the draw keeps it glued to a fast-moving exit between the 25Hz
@@ -324,8 +333,10 @@ local function makeWeaponGhostOverride(rec)
     return function(self, flags)
         local w = rec.weapon
         if not IsValid(w) then return end
+        if bit.band(flags, STUDIO_SHADOWDEPTHTEXTURE) ~= 0 then return end  -- no shadow-depth draw, so no weapon-ghost shadow (see makeGhostOverride)
         if localGhostIsCutaway(rec) then return end
         if ghostDrawVetoed(rec, self) then return end
+        if SysTime() - rec.lastSeen > GHOST_GRACE then return end  -- stop at grace, no bind-pose flash (see makeGhostOverride)
         copyBonesThroughPortal(rec, w, self)
         updateExitPlane(rec)
         local c = w:GetColor()
