@@ -469,12 +469,7 @@ local function startStraddle(ent, portal)
     local isLocalPlayer = ent == LocalPlayer()
     ghost.WPIsGhost = true
     ghost:SetNoDraw(false)
-    -- isLocalPlayer = this ghost is the local player's own body (only ever seen in third person /
-    -- mirrors / portal RT views). That one is kept shadowless - you never see your own shadow - via
-    -- DrawShadow(false) plus the STUDIO_SHADOWDEPTHTEXTURE skip in its override. Every other ghost
-    -- (props, ragdolls, NPCs, other players) gets DrawShadow(true) and casts a shadow: the lamp one
-    -- from the override, the sun/RTT one via CreateShadow in updateStraddle (a ClientsideModel won't
-    -- cast a sun shadow on its own).
+    -- Never draw shadows for the local player as you cannot normally see your own shadow
     ghost:DrawShadow(not isLocalPlayer)
 
     -- The PlayerColor material proxy reads ent:GetPlayerColor(); SetPlayerColor
