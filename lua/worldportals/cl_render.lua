@@ -3,16 +3,21 @@
 wp.matBlack = Material( "wp/black" )
 wp.matTrans = Material( "wp/trans" )
 wp.matInvis = Material( "wp/invis" )
-wp.matView = CreateMaterial(
-    "UnlitGeneric",
-    "GMODScreenspace",
-    {
-        [ "$basetexturetransform" ] = "center .5 .5 scale -1 -1 rotate 0 translate 0 0",
-        [ "$texturealpha" ] = "0",
-        [ "$vertexalpha" ] = "1",
-    }
-)
 wp.matView2 = CreateMaterial("WorldPortals", "Core_DX90", {["$basetexture"] = wp.matBlack:GetName(), ["$model"] = "1", ["$nocull"] = "1"})
+
+-- Blit material for the exit-view RT. A GMODScreenspace shader samples the RT by
+-- absolute framebuffer position, so a stereoscopy/VR eye (a sub-viewport) reads the
+-- wrong half; UnlitGeneric drawn over the eye's pixel rect samples the RT across exactly
+-- that eye instead (full screen in mono). The blit is a surface.DrawTexturedRect so the
+-- draw-color alpha carries portal transparency and each eye stays within its own rect
+-- (see cl_init.lua).
+wp.matViewUV = CreateMaterial("WorldPortals_ViewUV", "UnlitGeneric", {
+    ["$basetexture"] = wp.matBlack:GetName(),
+    ["$ignorez"] = "1",
+    ["$nocull"] = "1",
+    ["$vertexalpha"] = "1",
+    ["$translucent"] = "1",
+})
 
 wp.drawing = true --default portals to not draw
 wp.rendermode = false
@@ -27,6 +32,7 @@ wp._renderView = {
     w = 0,
     h = 0,
     fov = 0,
+    aspectratio = nil,
     origin = nil,
     angles = nil,
     dopostprocess = false,
@@ -481,10 +487,31 @@ function WorldPortals_RenderView(view)
     local angles = v.angles or EyeAngles()
     local width = v.width or v.w or ScrW()
     local height = v.height or v.h or ScrH()
-    local fov = v.fov or LocalPlayer():GetFOV()
+    local aspect = v.aspectratio or (width / height)
+    local fov = v.fov
+    if not fov then
+        -- A view struct with no fov renders at the engine's aspect-corrected (Hor+)
+        -- horizontal fov, not the raw GetFOV() 4:3-reference value. The RT must project
+        -- identically to the eye scene, so match it; falling back to GetFOV() zooms the
+        -- view in when portals open (a stereoscopy/VR eye passes no fov of its own here).
+        fov = math.deg(2 * math.atan(math.tan(math.rad(LocalPlayer():GetFOV() * 0.5)) * aspect / (4 / 3)))
+    end
 
-    if not wp.drawing then
-        wp.renderportals(origin, angles, width, height, fov, 1)
+    -- True only when this render.RenderView is a portal rendering its own exit RT
+    -- (nested - renderportals sets wp.drawing before recursing). A top-level eye
+    -- has wp.drawing false, including each stereoscopy/VR eye, which also routes
+    -- through render.RenderView; those must use the stencil portal view, not the
+    -- flat matView2 face path the entity Draw takes under rendermode.
+    local nested = wp.drawing
+
+    if not nested then
+        -- Each top-level view needs its own portal RTs, and every stereoscopy/VR
+        -- eye is a separate render.RenderView within one frame. frameRenderedChains
+        -- dedups renders within a single view's recursion, but its d=1 key omits
+        -- the camera - so without clearing it here a second eye would skip its own
+        -- portal render and reuse (or, on a size mismatch, blank) the first eye's RT.
+        for k in pairs(frameRenderedChains) do frameRenderedChains[k] = nil end
+        wp.renderportals(origin, angles, width, height, fov, 1, nil, nil, nil, nil, aspect)
     end
 
     local oldRenderMode = wp.rendermode
@@ -493,13 +520,24 @@ function WorldPortals_RenderView(view)
     local oldViewFOV = wp.viewfov
     local oldViewWidth = wp.viewwidth
     local oldViewHeight = wp.viewheight
+    local oldViewportX = wp.viewportX
+    local oldViewportY = wp.viewportY
+    local oldViewportW = wp.viewportW
+    local oldViewportH = wp.viewportH
 
-    wp.rendermode = true
+    wp.rendermode = nested
     wp.vieworigin = origin
     wp.viewangle = angles
     wp.viewfov = fov
     wp.viewwidth = width
     wp.viewheight = height
+    -- This eye's pixel rect, for the portal RT blit (cl_init.lua draws the RT over it).
+    -- A VR eye is a sub-viewport of the pushed g_VR.rt; a stereoscopy eye a sub-viewport
+    -- of the back buffer; the mono eye the whole screen (the RenderScene hook sets that).
+    wp.viewportX = v.x or 0
+    wp.viewportY = v.y or 0
+    wp.viewportW = width
+    wp.viewportH = height
     render.RealRenderView(view)
     wp.rendermode = oldRenderMode
     wp.vieworigin = oldViewOrigin
@@ -507,6 +545,10 @@ function WorldPortals_RenderView(view)
     wp.viewfov = oldViewFOV
     wp.viewwidth = oldViewWidth
     wp.viewheight = oldViewHeight
+    wp.viewportX = oldViewportX
+    wp.viewportY = oldViewportY
+    wp.viewportW = oldViewportW
+    wp.viewportH = oldViewportH
 end
 
 render.RenderView = WorldPortals_RenderView
@@ -789,7 +831,22 @@ hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
     frameCulledCount = 0
 end)
 
-function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd, parentPortal )
+-- The scene render leaves specular/HDR data in the RT's alpha channel; the translucent
+-- blit (cl_init.lua) would read that as opacity and show the nearest surfaces as fake
+-- translucency. Flatten alpha to 255 (RGB untouched) so the blit's opacity is clean -
+-- solid where the draw is opaque, the portal's transparency where it isn't.
+local function flattenRTAlpha(width, height)
+    render.OverrideColorWriteEnable(true, false)
+    render.OverrideAlphaWriteEnable(true, true)
+    cam.Start2D()
+        surface.SetDrawColor(255, 255, 255, 255)
+        surface.DrawRect(0, 0, width, height)
+    cam.End2D()
+    render.OverrideAlphaWriteEnable(false, false)
+    render.OverrideColorWriteEnable(false, false)
+end
+
+function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd, parentPortal, aspect )
     if ( wp.drawing ) then return end
     if not enabled then return end
 
@@ -812,7 +869,9 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
         return
     end
 
-    local aspect = width / height
+    -- The eye's true aspectratio (VR sets one that differs from w/h); the RT must
+    -- render at it so the through-portal view lines up vertically with the eye scene.
+    aspect = aspect or (width / height)
 
     -- Suppress phys gun glow/beam during the portal renders.
     local ply = LocalPlayer()
@@ -988,7 +1047,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     local childDepth = depth + 1
                     local drawPortalsInView = childDepth <= recurseDepth
                     if drawPortalsInView then
-                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward, portal)
+                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward, portal, aspect)
                     end
 
                     local oldDrawing = wp.drawing
@@ -1007,6 +1066,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     rv.w = width
                     rv.h = height
                     rv.fov = fov
+                    rv.aspectratio = aspect
                     rv.origin = camOrigin
                     rv.angles = camAngle
                     rv.zfar = zfar
@@ -1025,6 +1085,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
                     render.PopCustomClipPlane()
                     render.EnableClipping( oldClip )
+                    flattenRTAlpha( width, height )
                 render.PopRenderTarget()
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin, depth )
@@ -1052,6 +1113,11 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
+    -- The main eye fills the whole framebuffer. Stereoscopy/VR override this hook
+    -- and re-render each eye through render.RenderView with its own sub-viewport,
+    -- which restamps these; this is just the default for the un-overridden mono eye.
+    wp.viewportX, wp.viewportY = 0, 0
+    wp.viewportW, wp.viewportH = ScrW(), ScrH()
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 

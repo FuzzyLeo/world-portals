@@ -39,7 +39,7 @@ function ENT:Draw()
 
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
-    local texture, width, height, depth = wp.GetPortalDrawTexture(self)
+    local texture, _, _, depth = wp.GetPortalDrawTexture(self)
     if depth == 1 then
         self:SetTexture( texture )
     end
@@ -80,18 +80,19 @@ function ENT:Draw()
         if shouldrender then
             render.SetStencilCompareFunction( STENCIL_EQUAL )
 
-            wp.matView:SetTexture( "$basetexture", texture )
-
-            if transparency > 0 then
-                cam.Start2D()
-                    surface.SetDrawColor(255,255,255,transparency)
-                    surface.SetMaterial( wp.matView )
-                    surface.DrawTexturedRect( 0, 0, width, height )
-                cam.End2D()
-            else
-                render.SetMaterial( wp.matView )
-                render.DrawScreenQuad()
-            end
+            -- Blit the exit-view RT into the stencilled opening. cam.Start2D maps to this eye's
+            -- viewport (the whole screen in mono, a per-eye sub-viewport in stereoscopy/VR), so
+            -- the rect is viewport-local at (0,0) - each eye stays in its own viewport, no
+            -- cross-eye bleed - and the draw-color alpha carries portal transparency, blending
+            -- over what the stencil pass left behind (black for a solid portal, the world for a
+            -- transparent one).
+            local vw, vh = wp.viewportW or ScrW(), wp.viewportH or ScrH()
+            wp.matViewUV:SetTexture( "$basetexture", texture )
+            cam.Start2D()
+                surface.SetDrawColor( 255, 255, 255, transparency > 0 and transparency or 255 )
+                surface.SetMaterial( wp.matViewUV )
+                surface.DrawTexturedRect( 0, 0, vw, vh )
+            cam.End2D()
 
             render.SetStencilEnable( false )
         end
