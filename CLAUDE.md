@@ -4,149 +4,150 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Garry's Mod (Lua) addon that ships the `linked_portal_door` entity and a small `wp.*` runtime library. The portal entity renders one location through another using a stencil mask and a render-target texture, and (optionally) teleports anything that crosses it. The repository lives in-place inside `garrysmod/addons/world-portals`; there is no compile/build step.
+A Garry's Mod (Lua) addon shipping the `linked_portal_door` entity and a small `wp.*` runtime library. The portal renders one location through another (stencil mask + render-target texture) and optionally teleports anything crossing it. Lives in-place at `garrysmod/addons/world-portals`; no build step — GMod loads the `lua/` tree at server start.
 
-This is the **base layer** other addons sit on. The most prominent consumer is `AmyJeanes/Doors` (TARDIS-style doors), which builds its exterior↔interior teleporting on top of `linked_portal_door` and uses `wp.TransformPortal*` for player view/velocity transforms. The Doors CI combines this repo with that one into a single Workshop upload — paths here may collide with paths there at upload time, with the consumer winning.
-
-There is no `addon.json` (this repo is combined into Doors's Workshop upload at build time), but `.github/workflows/ci.yml` runs `glua_check` against the codebase on push and pull request to `dev`. GMod loads the `lua/` tree at server start.
+This is the **base layer** other addons build on. The main consumer is `AmyJeanes/Doors` (TARDIS-style doors): it builds exterior↔interior teleporting on `linked_portal_door` and uses `wp.TransformPortal*` for view/velocity transforms. Doors' CI combines both repos into one Workshop upload, so paths here can collide with Doors at upload time (consumer wins) — hence no `addon.json`. `.github/workflows/ci.yml` runs `glua_check` on push/PR to `dev`.
 
 ## Architecture
 
 ### Module layout
 
-`lua/autorun/worldportals_init.lua` is the only entry point. It:
-1. Creates the `wp` namespace (one global table — chosen because "worldportals" is too long for prefixing every helper).
-2. Manually `include`s every file in `lua/worldportals/`, dispatching by filename prefix:
-   - `sh_*.lua` — both realms; `AddCSLuaFile`'d on the server.
-   - `sv_*.lua` — server only.
-   - `cl_*.lua` — client only; `AddCSLuaFile`'d.
+`lua/autorun/worldportals_init.lua` is the only entry point: creates the `wp` namespace (one global table), then `wp.LoadFolder("worldportals")` — a folder scanner dispatching each `*.lua` by filename prefix: `sh_` (both realms, AddCSLuaFile'd), `sv_` (server), `cl_` (client, AddCSLuaFile'd). No recognised prefix → silently skipped, so the prefix is **mandatory**. Also `wp.LoadFolder("worldportals/falseworlds", true)` — the `noprefix` form that include+AddCSLuaFile's everything regardless of name (false-worlds extension point; ships only `example.lua`).
 
-There is no folder-scanning loader. Adding a new file means adding its `include`/`AddCSLuaFile` line to `worldportals_init.lua`. Keep the realm-prefix convention — the static analyzer's realm-mismatch heuristic uses it (and the consumer addon Doors depends on it for its own scanner).
+**Adding a file under `lua/worldportals/` needs no init edit** — give it a realm prefix and it's picked up. Keep the prefix convention: the loader, the analyzer's realm heuristic, and Doors' own scanner all depend on it. Entities under `lua/entities/` (`linked_portal_door`, `linked_portal_frame`) auto-load via GMod.
 
-### `wp.*` API surface (all in `sh_utils.lua` unless noted)
+### `wp.*` API (in `sh_utils.lua` unless noted)
 
-Math helpers used by both the entity and downstream consumers:
+- `wp.IsLookingAt(portal, portal_pos, view_pos, view_ang, view_fov)` — frustum/cone test to skip off-screen portals.
+- `wp.DistanceToPlane(pos, plane_pos, plane_fwd)` — signed distance.
+- `wp.TransformPortalPos/Angle(x, portal, exit)` — through-portal transform (WorldToLocal → 180° yaw mirror → LocalToWorld, with `GetExitPosOffset`/`GetExitAngOffset`).
+- `wp.TransformPortalVector(vec, portal, exit)` — direction-only (velocity), same pipeline so a real rotation at any pitch/yaw/roll. **The old `exit:GetAngles() - portal:GetAngles()` Euler-subtraction form flipped velocity on floor/ceiling/rolled pairs (the infinite-fall bounce) — don't go back to it.**
+- `wp.GetFirstPortalHit(source, dir)` — ray-vs-portal-plane scan over `wp.portals`.
 
-- `wp.IsBehind(pos, plane_pos, plane_forward) → boolean` — half-space test.
-- `wp.IsLookingAt(portal, portal_pos, view_pos, view_ang, view_fov) → boolean` — frustum/cone test, used to skip rendering portals the camera can't see.
-- `wp.DistanceToPlane(pos, plane_pos, plane_forward) → number` — signed distance.
-- `wp.TransformPortalPos(vec, portal, exit_portal) → Vector` — relative to entry, mirrored 180°, applied to exit (with `GetExitPosOffset`/`GetExitAngOffset` accounted for).
-- `wp.TransformPortalVector(vec, portal, exit_portal) → Vector` — direction-only variant.
-- `wp.TransformPortalAngle(angle, portal, exit_portal) → Angle` — rotates an angle through a portal pair.
-- `wp.GetFirstPortalHit(source, direction) → {Entity, Distance, HitPos}` — ray-vs-portal-plane scan over `ents.FindByClass("linked_portal_door")`.
+Allocation-free variants in `cl_render.lua` read per-portal cached basis scalars instead of calling engine `WorldToLocal`: `wp.TransformPortalPosInto(out, ...)` / `wp.TransformPortalAngleInto(out, ...)` write into a caller-owned Vector/Angle for hot paths.
 
-Plus rendering state and helpers in `cl_render.lua`:
+`cl_render.lua` state: materials `wp.matBlack/matTrans/matInvis/matView2` + `wp.matViewUV`/`wp.uvRemapMatrix` (paint the exit-view RT into the opening); `wp.drawing` (re-entrancy guard set during `render.RenderView`); `wp.rendermode` (true inside `RealRenderView`); `wp.renderparent` (scan-phase: the portal whose exit-view is being filled, nil at top level - the counterpart to draw-phase `wp.drawingent`, which is nil during the scan, so a `wp-shouldrender` veto reads `wp.renderparent` for render direction); `wp.shouldrender(portal, ...)` (visibility decision + `wp-shouldrender` hook); `wp.renderportals(...)`.
 
-- `wp.matBlack`, `wp.matTrans`, `wp.matInvis`, `wp.matView`, `wp.matView2` — runtime-created materials.
-- `wp.portals` — cached list, refreshed each `RenderScene`.
-- `wp.drawing` — re-entrancy guard set during `render.RenderView` calls so the entity's `Draw` skips work.
-- `wp.rendermode` — true while inside `RealRenderView`, used by `Draw` to pick the simpler material path.
-- `wp.shouldrender(portal, camOrigin?, camAngle?, camFOV?)` — runs the full visibility decision and fires the `wp-shouldrender` hook to allow override.
-- `wp.renderportals(plyOrigin, plyAngle, w, h, fov)` — renders every portal's exit-view to its texture.
+`wp.portals` (in `sh_portals.lua`) is a maintained array of live portals — registered from each portal's shared `Initialize`, deregistered via `EntityRemoved`, rebuilt fresh on change (never mutated in place, so a held reference survives mid-iteration), re-discovered on hot-reload. Hot paths iterate it instead of `ents.FindByClass` per tick/frame.
 
 ### Entity: `linked_portal_door`
 
-Three files:
-- `shared.lua` — type/render group, `Initialize`, `SetupBounds` (recomputes render/collision bounds + the 5 quads used for inverted/thick rendering), and the `SetupDataTables` block that creates every networked field (`Exit`, `Width`, `Height`, `Thickness`, `Transparency`, `ZFar`, `Open`, `EnableTeleport`, `Inverted`, `CustomLink`, `ExitPosOffset`/`ExitAngOffset`, `ModelPos`/`ModelAng`). `NetworkVarNotify`s rebuild bounds when width/height/thickness change.
-- `init.lua` (server) — `KeyValue` handles Hammer entity I/O (`partnername`, `width` ×2, `height` ×2, `thickness`, `DisappearDist`, `angles`, `EnableTeleport`, `Open`, output `On*` are forwarded to `StoreOutput`); `Touch` does the actual teleport (entry-side check via `DistanceToPlane`, fires the `wp-shouldtp` hook for veto, transforms pos/velocity/angle, special-cases ragdolls by snapshotting all physics objects' local pose then re-applying after `SetPos`, sends the `WorldPortals_VRMod_SetAngle` net message in VR mode and `WorldPortals_Teleport` to all clients); `AcceptInput` handles the Hammer inputs.
-- `cl_init.lua` — `Draw` is the stencil-and-stencil dance. With the model error.mdl marker (no model assigned) it draws a black box (or thick portal quads when `Thickness > 0`); with a model assigned it draws via `render.Model`. When `wp.rendermode` is true (we're inside `RenderView` for another portal) it uses the simpler `matView2`-textured path instead of stenciling. The non-`rendermode` path writes a stencil mask, draws the portal black/transparent, then rerenders the contents through `matView` only where the stencil matches — alpha blended via `cam.Start2D` if `Transparency > 0`. Receives `WorldPortals_VRMod_SetAngle` (rotates VR origin) and `WorldPortals_Teleport` (mirrors the server-side `SetPos`/`SetAngles` so non-server-authoritative clients don't see lag).
+- `shared.lua` — `Initialize` (registers in `wp.portals`), `SetupBounds` (render/collision bounds + the 5 quads for inverted/thick rendering), `SetupDataTables` (networked fields: `Exit`, `Width/Height/Thickness`, `Transparency`, `ZFar`, `Open`, `EnableTeleport`, `Inverted`, `CustomLink`, `ExitPosOffset/ExitAngOffset`, `ModelPos/ModelAng`). Width/Height/Thickness notifies rebuild bounds + (server) the collision-frame hull; `Open`/`EnableTeleport` notifies call `wp.DisarmPortal` when the portal goes closed/non-teleporting so a mid-pass-through prop isn't left no-collided through a now-solid parent.
+- `init.lua` (server) — `KeyValue` (Hammer I/O), `Touch` teleports **non-player entities only** (players use the predicted SetupMove path): entry-side `DistanceToPlane` check, `wp-shouldtp` veto, transform pos/vel/angle, ragdoll physics-object pose snapshot/re-apply around `SetPos`, broadcast `WorldPortals_Teleport`. `Touch` also arms the pass-through no-collide for a dynamic/held prop and pre-arms the exit on teleport; `EndTouch` disarms. `RebuildCollisionFrame` (from `Initialize`) creates the `linked_portal_frame` child; `OnRemove` tears it down (unparented, so not auto-removed).
+- `cl_init.lua` — `Draw` is the stencil dance. No model (error.mdl marker) → black box or thick quads (`Thickness > 0`); model assigned → `render.Model`. Under `wp.rendermode` (inside another portal's RenderView) it uses the simpler `matView2` path instead of stenciling. Net receives: `WorldPortals_VRMod_SetAngle` (VR yaw), `WorldPortals_Teleport` (mirrors server `SetPos`/`SetAngles` for remote clients; skipped for `LocalPlayer` who predicted it — instead records via `wp.RecordNetTeleport` for the debug HUD).
 
-### Stencil rendering pipeline (`cl_render.lua`)
+### Stencil rendering pipeline (`cl_render.lua`) — most fragile piece
 
-This is the most fragile / load-bearing piece. The flow in a single frame:
+Per frame: `render.RenderView` is monkey-patched to first render every portal's exit-view to its RT (recursively; `wp.drawing` guards prevent infinite recursion), then pass through to `RealRenderView`. `wp.renderportals` iterates portals `wp.shouldrender` accepts: push RT → push a clip plane at the exit back-face → compute camera by `TransformPortal*`-ing the view → set `zfar` from portal/exit distance → recursive `RenderView` with `viewid = 1` (`VIEW_3DSKY`, the trick that avoids HUD/postprocess). Phys-gun glow is zeroed during the loop. `RenderScene` calls `renderportals` for the eye view; `PreDrawHalos` returns false while `wp.drawing`. The order and the `wp.drawing`/`wp.rendermode` guards are why nearly every callback checks them first.
 
-1. `render.RenderView` is monkey-patched (`render.RenderView = WorldPortals_RenderView`). On every call: render every portal's exit-view to its render-target texture (recursively — `wp.drawing` guards prevent infinite recursion), then pass through to `RealRenderView` for the actual scene draw.
-2. `wp.renderportals` iterates `linked_portal_door` entities. For each portal that `wp.shouldrender` accepts:
-   - Push its render target.
-   - Push a custom clip plane at the **exit** so geometry behind the exit's back face doesn't bleed.
-   - Compute the camera origin/angle by `TransformPortal*`-ing the player's view through the pair.
-   - Compute `zfar` based on portal-to-exit distance + the player's forward distance (so faraway exits aren't culled prematurely).
-   - Recursively `RenderView` with `viewid = 1` (`VIEW_3DSKY`) — this is the trick that makes the engine treat it as "skybox view" and avoids HUD/postprocess.
-3. Disable phys gun glow/beam during the loop by zeroing the local player's weapon color and restoring after.
-4. `RenderScene` hook calls `renderportals` for the actual eye view (in addition to the monkey-patched `RenderView` recursion), so even if `RenderView` was never called externally the portals still get textured for `Draw`.
-5. `PreDrawHalos` returns false while `wp.drawing` so halo renders inside portal views don't break the stencil.
+Stereoscopy/VR render each eye as its own top-level `render.RenderView`, so portal RTs fill per-eye: `frameRenderedChains` clears per eye, the overlap cull measures in the eye's view `width/height` (not `ScrW/ScrH`, which shifts under a pushed RT), and the d>1 RT pool is partitioned by resolution (a named `GetRenderTarget` is size-locked, so the mono pass and a smaller eye need separate surfaces - sharing one leaked immortal surfaces and crashed). The exit-view RT composites via `render.DrawScreenQuad` in the 3D context (`cl_init.lua`), UV-remapping the eye's slice of the render target and scissoring to the eye rect (a no-op in mono); an eye that passes no `fov` gets the engine's Hor+ aspect-corrected value so the RT projects identically. VR also skips the wasted full-screen desktop pass (`vrmod.IsPlayerInVR()` in `RenderScene`).
 
-The order matters and the `wp.drawing` / `wp.rendermode` guards are why almost every callback in this addon checks them first.
+### Predicted player teleport (`sh_teleport.lua`)
+
+Players teleport in a `SetupMove` hook running in the prediction loop on both realms (LocalPlayer only client-side), so the local view stays in lockstep without waiting for a snapshot. Non-player entities can't be client-predicted (server-authoritative VPhysics) — they stay on `ENT:Touch`.
+
+Per-tick: skip dead/near-zero-velocity; per portal skip closed/no-teleport/no-exit/not-approaching (`velocity:Dot(fwd) >= 0`); fire on a **swept crossing of the `portal:GetPos()` plane** by the eye OR the hull centre (eye is the anti-cull guard — same plane `wp.shouldrender` culls on, so firing here beats the cull; centre catches jump-over and floor-portal cases); in-face bounds check (eye OR centre); `wp-shouldtp` veto.
+
+Then apply, with these hard-won rules — **don't "simplify" them away**:
+- `mv:SetOrigin/SetVelocity/SetAngles` + `cmd:SetViewAngles` every pass. `mv:SetAngles` is what gamemovement reads for WASD direction (without it, direction-changing portals skid); safe to re-apply on resim.
+- `ply:SetPos(newPos)` **every pass** (server + client first-time AND resim): resets the AbsOrigin interp cache `mv:SetOrigin` doesn't touch, and makes `ply:GetPos()` report the destination before `wp-teleport` runs so a consumer unstick resolves against it. (First-time-only left the origin at the raw transform on resim → high-ping stuck-after-teleport.)
+- `ply:SetEyeAngles(clampedAng)` **client-only, first-time-only** (or server-only in singleplayer, which runs no client prediction). It's what actually rotates the camera (`cmd:SetViewAngles` alone no-ops it); the rotated angle rides out in subsequent cmds so the server converges on its own. *First-time only* because it writes a persistent field — re-writing on resim clobbers mouse moved since. *Not server* because a server write makes it authoritative and the snapshot pushes it back ~RTT later, overriding in-flight mouse (confirmed snap-back; a server write was tried and reverted).
+- Server branch: VR yaw, `ForcePlayerDrop`, outputs, `wp-teleport`, mv re-sync (re-read `ply:GetPos()` so a consumer relocation survives FinishMove), broadcast.
+- Client branch, **every pass**: `wp-teleport` + the same mv re-sync — a consumer unstick (Doors) relocates via `ply:SetPos` inside `wp-teleport` and must re-apply each resim or FinishMove reverts to the raw (often embedded) pos for the ~RTT the crossing command stays unacked. The unstick is a deterministic idempotent resolver, so re-running is safe. **Consumers' `wp-teleport`/`PostTeleportPortal` handlers must be idempotent and resim-safe.**
+- Client branch, **first-time only**: arm roll fade (`wp.rotating`), predict-lerp window (`wp.predictedPos/At`), debug record — persistent client-frame state that must NOT re-fire on resim (every resim is the same frame).
+
+**Accepted limits — documented so they're not re-attempted:**
+- *High-ping angle contamination.* A predicted teleport at high ping can double-rotate or rotate-and-roll-back the player: client `SetEyeAngles` feeds forward into the next cmds, and prediction tolerance lets the server cross on a *different* command than the client, so the "late" realm reads an already-rotated viewangle. Not cleanly fixable in Lua (predicted DT vars flow server→client only, no clean-angle channel back). Don't retry: the inference fix (reject `view ≈ TransformPortalAngle(stored)`) false-positives on the genuine exit approach and latches a stale angle; the clean fix (carry rotation as a render+movement offset, never rotate `m_angEyeAngles`) needs a global `EyeAngles` override that breaks every consumer's aim.
+- *Predict-lerp shift.* `ply:SetPos` doesn't override the engine's snapshot origin lerp: at high ping a pre-teleport snapshot makes `ply:GetPos()` lerp from the old pos for ~RTT (blank-sky frames, wrong frustum origin). Lua can't disable this lerp. Mitigation: `cl_viewcorrections.lua`'s `CalcView`/`CalcViewModelView` shift the camera/viewmodel by `GetNetworkOrigin() - GetPos()` while `wp.predictedPos` is armed, parking the camera at the server-known pos. Use `NetworkOrigin`, not the static `predictedPos` (which freezes the view as the player walks on). Sanity guard: if `NetworkOrigin` is still nearer `predictedOldPos` than `predictedPos` the snapshot hasn't arrived — skip the shift (else it yanks the camera back to oldPos). Disarm is a pure 0.5s `SysTime` timeout — convergence detection failed (engine drift is non-monotonic, so `|delta|` dips below threshold and re-exceeds, firing the disarm early). Use `SysTime`, not `CurTime` (`CurTime` in SetupMove is the future predicted-tick time). `SetRenderOrigin` is a no-op on the local playermodel (works on props), so the local model still lerps — invisible first-person, briefly visible in mirrors.
+- *Residual NetworkOrigin stutter.* `NetworkOrigin` isn't interpolated for the local player, so during fast post-teleport motion the camera steps along server ticks (~7u at 500 u/s, converges, no lasting desync). A threshold-gated blend-out would fix it but touches this fragile logic and a naive convergence-disarm already regressed once → left as-is.
+- *Noclip re-teleport cooldown.* `FullNoClipMove` discards `mv:SetVelocity`, so the mirrored exit velocity never takes and a same-facing pair (TARDIS) ping-pongs forever. A 0.25s `NOCLIP_TP_COOLDOWN` (resim-safe via `since > 0`) suppresses the immediate re-fire. The thick-volume `backLimit` allowance is also dropped in noclip (no collision to trap a noclipper, so it just reopens the bounce).
+- *Deferred — zero-velocity static net.* A player standing dead-still on a floor portal never crosses (the velocity gate + swept test only fire on motion). A static-rest path was scoped but not built; known gap, not a regression.
+
+### Portal ghosts (`cl_ghosts.lua`) — continuous entity rendering
+
+Client-only visual layer so an entity straddling a portal reads as one body instead of being cut off at the opening. Renders **two clipped halves**: the real entity (`RenderOverride` clipping to `+entry_forward`) and a clientside **ghost** (`ClientsideModel`, flagged `WPIsGhost`) at the mirror-transformed exit pose clipping to `+exit_forward`. The seam sits on the portal's visible face (`FACE_OFFSET` + `thickness`), not the crossing plane behind it. Decoupled from the teleport — straddling is a per-frame geometry test (`straddles`: cheap OBB-centre-in-opening, plus a 12-edge OBB-vs-plane clip for long/off-axis props).
+
+- **Discovery** on a throttled `Think` (~25 Hz): `ents.FindInSphere` per open teleport-enabled portal — radius padded by `reachOf` (`OBBCenter():Length() + BoundingRadius()`) on *both* the portal and the largest tracked candidate, since `FindInSphere` culls on origins and an origin can sit far from the geometry that matters (a ladder's is at one end; a portal's box sits behind its face). Candidate reach is cached per entity (weak-keyed `reachByEnt`), `maxReach` recomputed only when an at-max entity leaves, with a `REACH_FLOOR` so a straddling player/NPC/ragdoll is caught when no larger prop set the max. Gated by `isCandidate` (prop_physics/ragdoll/NPC/player incl. local; skips dead players, our ghosts, and NoDraw'd props - a NoDraw'd prop would ghost as a bodiless emerged half) and `wouldTeleport` (the same `wp-shouldtp` veto — position-independent, the right "portal off" signal; NOT `wp-shouldrender`, which is view-dependent and would vanish the ghost inside an interior).
+- **Pose + clip planes** are recomputed **per draw inside the `RenderOverride`**, not in a per-frame hook: a ghost only ever draws in the portal RT passes (portals render under `VIEW_3DSKY`), so a `PreDrawOpaqueRenderables` pose would miss the very pass it's drawn in and lag a fast-moving portal. Each override computes the one clip plane it consumes — `updateEntryPlane` on the real entity, `updateExitPlane` on the ghost — reading the original's *render* transform (so it lands after `cl_renderfollow` finalises it). Rigid props: `poseGhost` (`SetPos`/`SetAngles`) then `SetupBones` (`DrawModel` renders from bone matrices the engine built off the *pre-override* transform, so `SetPos` alone wouldn't move the draw). Skeletal (ragdoll/NPC/player): per-bone via `copyBonesThroughPortal`, which composes the portal transform once as a `VMatrix` (`exitFrame * yaw180 * entryFrame:GetInverseTR()`) and applies `M * GetBoneMatrix(i)` per bone — also inside the `RenderOverride` because `SetBoneMatrix` is consumed by the next `DrawModel`. The throttled scan also calls `poseGhost`, but only to keep the ghost's cull bounds current between draws. A held weapon is mirrored as a second sub-ghost.
+- **Records** (`wp.ghosts[ent]`) carry a 0.1s anti-flicker grace, are re-pointed to the new pair the instant the entity teleports (the `wp-teleport` hook updates `rec.portal/exit` before render, killing a one-frame flicker), and tear down on expiry/`EntityRemoved` (restoring the saved `RenderOverride`). `wp.IsGhosting(ent)` reports whether a record exists - a consumer that also drives the entity's `RenderOverride` (Doors' cordon) yields the slot while it's true.
+- **Local player:** ghost is the emerged half, shown in third-person/external/RT/recursion, suppressed only in the view looking straight through the transited portal (`localGhostIsCutaway`). Player colour via overriding `GetPlayerColor` on the ghost (`SetPlayerColor` errors on a `ClientsideModel`).
+- Convars `worldportals_ghosts` (master) / `worldportals_show_self` (own body; created in `cl_render.lua`, also gates `ShouldDrawLocalPlayer` so off = no self-reflection in RTs). Consumer hook `wp-shouldghostdraw` under Conventions.
+
+### Rapid-loop interp bypass (`cl_renderfollow.lua`)
+
+A non-player prop teleporting twice within `RAPID_WINDOW` (a tight floor↔ceiling loop) renders at its live `GetNetworkOrigin/Angles` instead of the engine's `cl_interp` history (which resets each teleport and freezes the prop into an ~8 Hz stutter) — snapping on entry, easing back on exit. Armed off `wp-teleport` (client, players excluded); applied in a `Think` over `wp.renderFollow`; `cl_ghosts` pose reads the `SetRenderOrigin` it sets. Accepted limit: a prop leaving the loop still moving gets a brief freeze.
 
 ### Trace redirection (`sh_teleport.lua`)
 
-Two things:
+1. **`EntityFireBullets`** — bullets toward a portal get `data.Src`/`Dir` rewritten exit-side, `data.IgnoreEntity` set from `wp-tracefilter`; return `true` so the engine uses the modified data.
+2. **`util.TraceLine` monkey-patch** — `util.RealTraceLine` captures the original; `WorldPortals_TraceLine` re-traces from the exit if a portal sits between start and hit. Re-installed in `InitPostEntity` to win the race against addons that also replace `util.TraceLine`.
 
-1. **`EntityFireBullets` hook** — bullets fired toward a portal get their `data.Src` and `data.Dir` rewritten to the exit-side, and `data.IgnoreEntity` is overwritten with whatever `wp-tracefilter` returns. Returning `true` from the hook tells the engine "use my modified data".
-2. **`util.TraceLine` monkey-patch** — `util.RealTraceLine` captures the original; `util.TraceLine` becomes `WorldPortals_TraceLine` which, if a portal sits between start and hit, re-traces from the exit-side instead. Re-installed in `InitPostEntity` because some addons replace `util.TraceLine` themselves and we need to win the race.
+The monkey-patch is **global** — every consumer's traces go through it. Be deliberate; silent regressions hit every addon.
 
-The monkey-patch is global: every consumer's traces go through it whether they know about portals or not. Be deliberate when changing this — silent regressions affect every addon.
+### Server: PVS & pairing (`sv_render.lua`)
 
-### Server: PVS and portal pairing (`sv_render.lua`)
+- `SetupPlayerVisibility` adds the exit origin to PVS for anyone who can see the entry — the only way GMod allows the out-of-PVS exit scene to render (else the RT draws empty).
+- `PairWithExits` (at `InitPostEntity` + `PostCleanupMap`) sets each portal's exit by partner name if invalid — Hammer load order isn't guaranteed.
 
-- `SetupPlayerVisibility` adds the exit portal's origin to PVS for any player who can see the entry. Without this, the exit-side render target draws empty. This is the only way GMod allows out-of-PVS scenes to be visible.
-- `PairWithExits` runs at `InitPostEntity` and `PostCleanupMap`: walks every `linked_portal_door` and `:SetExit(ents.FindByName(:GetPartnerName())[1])` if its exit is invalid. Required because Hammer load order isn't guaranteed and a portal may initialize before its partner exists.
+### Server: portal-aware collision (`sv_collision.lua`, `linked_portal_frame`)
 
-### Client: view roll on teleport (`cl_teleport.lua`)
+A portal is usually parented to a solid structure (e.g. a shell), and the teleport only fires once a prop's centre crosses — so a big prop jams on that parent first. Two server pieces fix it (no collidable ghost exists — a clientside entity can't block server props); with the visual ghosts, a prop reads as passing through.
 
-When the server teleports the local player and the new angle has nonzero roll, `WorldPortals_TeleportAlert` arrives with the roll value. A `CalcView` hook then `math.Approach`es the roll back to 0 over a few frames so the world doesn't snap-rotate on landing. Fully cosmetic; pulling it out is fine if the math ever causes problems.
+**Pass-through no-collide.** While a dynamic/held prop touches an open teleport-enabled portal (armed from `ENT:Touch`, event-driven), it's `constraint.NoCollide`d with the solids `wp-nocollide` returns, disarmed on `EndTouch`/close/disable/removal. State: `wp.nocollide[ent][portal]`; API `wp.ArmNoCollide`/`DisarmNoCollide`/`DisarmAllNoCollide`/`DisarmPortal`. Phase solids = exactly what `wp-nocollide` returns — the consumer owns the decision (its structure may not be engine-parented to the portal); omitting an entity keeps it solid (default-solid), so a missed one jams the prop rather than voiding it. Two sharp edges: (1) the already-armed check runs **before** `eligible()`, because the NoCollide makes the prop appear in the parent's constraint network and would fail the contraption guard on re-arm; (2) the `NoCollide` is created with `disableOnRemove = true` (5th arg) so a bare `:Remove()` re-enables the pair — without it, `:Remove()` leaves the VPhysics pair disabled forever (silent permanent ghosting). A sleeping prop isn't re-tested by triggers, so a portal moving out from under one never fires its `EndTouch`; a `Tick` handler wakes armed props whose portal moved so the trigger re-evaluates and disarms them.
+
+**Collision frame (`linked_portal_frame`).** Invisible server-built perimeter hull (`FrameSlabs` → 4 box slabs via `PhysicsInitMultiConvex`) funnelling a transiting prop through the opening while the parent is "removed" for it. `COLLISION_GROUP_WEAPON` (hits props, not players — players keep their predicted path), no `EnableCustomCollisions` (physics-vs-physics suffices; ECC would block bullet/use traces). Created/resized by `RebuildCollisionFrame`/`BuildFrame`. Two verified choices:
+- **Unparented** — a parented frame would be a descendant of the parent, so the prop↔parent no-collide would phase the frame the instant a prop armed. Unparented, it follows via its own `Think`; `wp.NoCollideFrame` re-adds the frame↔parent no-collide it loses (else the solid hull interpenetrates the parent and the solver shoves it), **parent-only** so it doesn't grab an armed transiting prop. `BuildFrame` recreates the physobj, which orphans that no-collide (a `logic_collision_pair` fires its disable once and never reapplies, and stays valid so `NoCollideFrame`'s IsValid check won't replace it) — so `BuildFrame` drops + re-adds it. (Tested: the orphaned state doesn't shove a *settled* parent, but it leaves collision silently wrong and would push the parent if the orphaned frame then moves.)
+- **Physics shadow, not a static body** — `MakePhysicsObjectAShadow(false,false)` + per-tick `UpdateShadow`, so a moving portal **pushes** props in the doorway; a static `SetPos`'d hull flung them. A single-tick jump past `SHADOW_TELEPORT_DIST` can't be swept, so it snaps.
+
+Client half of the frame is debug-only: `worldportals_debug_collision` draws the slabs (rebuilt client-side from networked dimensions).
+
+### Client: view roll, predict-shift, stair-strip (`cl_viewcorrections.lua`)
+
+A combined `CalcView` hook does three things, all mirrored onto the viewmodel via `CalcViewModelView` (so the physgun/hands ride with the camera), both bailing when `GetViewEntity() ~= ply` (leave camera/monitor views alone):
+(a) **roll fade** — `math.Approach`es `wp.rotating` (armed by the SetupMove path / `wp.ArmTeleportView`) to 0 so the world doesn't snap-rotate on landing;
+(b) **predict-lerp shift** — see Predicted player teleport above;
+(c) **stair-strip** — subtracts the engine's `SmoothViewOnStairs` eye-Z easing (measured as `pos.z - EyePos().z`, stashed in `wp.stairLeak`) for a brief window after a grounded portal exit, so the landing's big Z change isn't read as one huge stair step.
+Roll fade + stair strip arm in **both** realms (the singleplayer net handler calls `wp.ArmTeleportView`); the predict-shift is prediction/ping-only (nil in singleplayer). Removing the roll fade alone is fine; removing the predict-shift reintroduces the blank-sky frame at high ping.
+
+### Client: predicted-teleport debug HUD (`cl_predictdebug.lua`)
+
+Developer HUD behind `worldportals_debug_predict` (default off). Buffers the last few predicted teleports (`wp.RecordTeleportEvent` from `sh_teleport.lua`) + the last self-broadcast pos (`wp.RecordNetTeleport`) and renders per-frame ply state, predict-lerp panel, and nearest-portal swept-test inputs — useful on paused frames. Record calls are guarded (`if wp.RecordTeleportEvent then`) so the file is a clean delete; the counters it reads live in `cl_viewcorrections.lua`/`sh_teleport.lua` so removing it can't break the predict path.
 
 ### Optional integrations
 
-- **`vrmod`** — only touched behind `if vrmod then` guards. The stub at `.luatypes/vrmod.lua` declares the three functions used (`IsPlayerInVR`, `GetOriginAng`, `SetOriginAng`). VR users get a yaw-offset rotation on teleport so their head doesn't whip around.
-- **No CPPI, no WireLib.** This repo doesn't depend on either.
+- **`vrmod`** — only behind `if vrmod then`; stub at `.luatypes/vrmod.lua` (`IsPlayerInVR`, `GetOriginAng`, `SetOriginAng`). VR users get a yaw-offset on teleport.
+- **No CPPI, no WireLib.**
 
 ## Conventions when adding code
 
-- **Pure Lua syntax only — no GMod-Lua extensions.** No `//` comments, no `continue`, no `!=`, no `&&`/`||`. Use `--`, `goto continue`, `~=`, `and`/`or`. Earlier code had `!=` in `sh_utils.lua` which the analyzer (and pure Lua parsers) reject; keep it that way.
-- **Realm-prefix filenames.** `sh_`, `sv_`, `cl_` as prefixes. Suffix conventions break the analyzer's realm-awareness heuristic.
-- **For `pairs`/`ipairs` loops, drop the variable you don't use rather than naming it.** `for _, v in pairs(t)` discards the key, `for k in pairs(t)` discards the value, `for _ = 1, n do` for plain N-iteration. The `unused` lint is on so future dead `local x = expensive_call()` survivors get flagged — keep the noise floor at zero by using these forms.
-- When monkey-patching engine globals (`util.TraceLine`, `render.RenderView`), capture the original under a `Real*` alias **once** before reassigning, and reinstall the patch in `InitPostEntity` so addons that load after us don't clobber it.
-- Hooks fired for downstream consumers (`wp-shouldrender`, `wp-trace`, `wp-tracefilter`, `wp-shouldtp`, `wp-teleport`, `wp-allowthickportal`, `wp-predraw`/`postdraw`, `wp-prerender`/`postrender`) all use `hook.Call(name, GAMEMODE, ...)`. Don't change the calling convention without updating consumers (Doors hooks all of these).
-- `wp-prerender` and `wp-postrender` fire as `(portal, exitPortal, plyOrigin, depth)` — the recursion depth (1 = top-level player view, 2+ = nested through-portal renders). Consumers that mutate engine state across the pre/post pair (e.g. cordon's `SetNoDraw` save/restore) MUST guard on `depth > 1` to skip nested renders, or the parent's saved state gets clobbered by a nested pre-render before the parent's post-render restores it.
+- **Pure Lua only — no GMod-Lua extensions.** No `//`, `continue`, `!=`, `&&`/`||`. Use `--`, `goto continue`, `~=`, `and`/`or`.
+- **Realm-prefix filenames** (`sh_`/`sv_`/`cl_`). Suffixes break the analyzer's realm heuristic.
+- **Comments: concise, why-not-what.** A couple of lines; reserve length for genuinely non-obvious rationale, and bias toward cutting — match the surrounding density, don't pad to essay length. Don't restate the code. Keep the *why* inline and self-contained — don't point a reader at an external doc (`memory/`, this file) or lean on a fragile cross-file pointer. Don't explain code by what it replaced (no "this replaces the old X that did Y") — state the live *why*, or the *why-not* for an obvious-but-wrong alternative. The hard-won why is worth keeping; the wall of prose around it isn't. Keep comments ASCII: use `->`, not `→`. For a dash use a single spaced hyphen; never a double `--` (reads as a second comment marker) or an em-dash (em-dashes are fine in this file's prose, nowhere else).
+- **Drop unused loop variables** rather than naming them: `for _, v in pairs(t)`, `for k in pairs(t)`, `for _ = 1, n do`. The `unused` lint is on — keep the noise floor at zero.
+- **Monkey-patching engine globals** (`util.TraceLine`, `render.RenderView`): capture the original under a `Real*` alias once, and reinstall in `InitPostEntity` so later-loading addons don't clobber it.
+- **Consumer hooks** all use `hook.Call(name, GAMEMODE, ...)`: `wp-shouldrender`, `wp-trace`, `wp-tracefilter`, `wp-shouldtp`, `wp-teleport`, `wp-allowthickportal`, `wp-shouldghostdraw`, `wp-nocollide`, `wp-predraw`/`postdraw`, `wp-prerender`/`postrender`. Don't change the calling convention without updating Doors (it hooks all of these).
+
+Hook contracts that bite if misused:
+- **`wp-shouldghostdraw(sourceEnt, ghostEnt, portal, exit)`** (client) — fired **inside the ghost's `RenderOverride`, once per render pass**; return `false` to skip drawing in that pass. For an exit in a region hidden from the open world (a TARDIS interior in the skybox), the ghost must draw only in that region's RT pass, not the main scene. **Must not be cached** — the answer differs between the main-scene pass and each RT pass in one frame. Doors routes it (via `exit:GetParent()`) to a `ShouldDrawGhost` interior hook. Deliberately does NOT touch the `SetNoDraw` cordon (reserved for engine-native props).
+- **`wp-shouldtp` + `wp-teleport` fire on both realms** for predicted player teleports (from `SetupMove`). `wp-shouldtp` once per crossing; `wp-teleport` on the client **every prediction pass (first-time AND resim)** (server fires it once per command). The client re-fires so a consumer's position fix re-applies each resim — so **handlers must be idempotent and resim-safe** (no sounds/effects/counters; pure deterministic resolvers only). Register the hooks **shared** (Doors moved `wp-shouldtp` out of `if SERVER`). Inner `CallHook` chains can stay server-only and return nil client-side; the client optimistically allows, server is authoritative.
+- **`wp-nocollide(portal, ent)`** (server) — return the complete list of solids the transiting prop may phase through; world-portals no-collides exactly that, skipping the prop itself / ghosts / portals / frames and anything without a physics object. The consumer owns the decision — omitting an entity keeps it solid, so a missed one merely *jams* a prop (recoverable) instead of dropping it into the void. Field contract: `ent.WPIsGhost == true` = a clientside ghost (collision + ghost passes skip it); don't repurpose it.
+- **`wp-prerender`/`wp-postrender`** fire as `(portal, exitPortal, plyOrigin, depth)` (1 = top-level, 2+ = nested). A consumer that saves/restores global render state across the pair MUST guard on `depth > 1` to skip nested renders, or a nested pre-render clobbers the parent's saved state before its post-render restores.
 
 ## Tooling
 
-`.luarc.json` configures `glua_ls` / `glua_check` (both on EmmyLua-Analyzer-Rust) with `./.tools/glua-api` (GLua type stubs) and `./.luatypes` (local override aliases and the `vrmod` stub). The recommended VS Code extension is `Pollux.gmod-glua-ls`.
+`.luarc.json` configures `glua_ls`/`glua_check` (both EmmyLua-Analyzer-Rust) with `./.tools/glua-api` (GLua stubs) and `./.luatypes` (local overrides + the `vrmod` stub). VS Code extension: `Pollux.gmod-glua-ls`.
+
+**Setup (fresh clone, before touching `.lua`):** `pwsh -File scripts/install-tools.ps1` — the single source of truth for `glua_check`/`glua_ls`/stubs, versions pinned at the top and shared with CI. Idempotent (no-op when present), so also the recovery path when diagnostics look wrong; the `glua-lsp:install-glua-ls` skill covers the same. The `glua-lsp` plugin auto-resolves `glua_ls` from `.tools/bin/` at launch; after a fresh install, `/reload-plugins`. Bump versions via the constants in that script (Renovate raises bump PRs, gated by the GLua Check CI job).
+
+**Whole-repo scan:** `pwsh -File scripts/glua-check.ps1` (installs tooling on demand, runs `glua_check --warnings-as-errors`; CI calls the same). `glua_ls` only analyzes open/edited files, so use this to audit everything. Treat diagnostics as actionable only if your edit caused them — pre-existing noise on unrelated lines isn't in scope.
+
+LSP diagnostics/hover/jump are via the [`glua-lsp` plugin](https://github.com/AmyJeanes/gmod-claude-plugins) (wraps `glua_ls`, same engine as `glua_check`); `.claude/settings.json` declares the marketplace so contributors get prompted. Diagnostics arrive automatically after edits.
 
 ### Type annotations
 
-Patterns that matter for this codebase:
+- **Trace redirection (`sh_teleport.lua`).** `util.RealTraceLine` returns a `TraceResult`, not the input `Trace`. The result is named `trace`, but `mask`/`filter` come off the input `data` — keep that straight; `trace.mask`/`trace.filter` would read fields a `TraceResult` lacks.
+- **Field-access narrowing doesn't propagate.** `if not (data.Src and data.Dir) then return end` does NOT narrow `data.Src`/`Dir` below. Copy each into a local, null-check the locals on separate lines, then use the locals.
+- **Trace struct casts.** Inline tables passed to `util.TraceLine`/`RealTraceLine` may not match the `Trace` struct (partial narrowing); an inline `--[[@as Trace]]` cast is cleaner than restructuring when the logic is correct.
+- **`.luatypes/`** — local LuaLS stubs. `glua_overrides.lua` aliases the integer enums (`COLLISION_GROUP`, `FORCE`, `STENCILOPERATION`, `STENCILCOMPARISONFUNCTION`; glua-api ships them as string-literal unions that break `SetCollisionGroup(COLLISION_GROUP_WORLD)`) and adds the 2-arg `table.insert(tbl, value)` overload. `vrmod.lua` declares the VR globals.
 
-- **Trace redirection in `sh_teleport.lua`.** `util.RealTraceLine` returns a `TraceResult`, not the input `Trace`. Be careful with variable naming — calling it `trace` and then reading `trace.mask`/`trace.filter` looks fine but accesses fields that don't exist on `TraceResult` (this is a long-standing latent bug in `WorldPortals_TraceLine`; see the warning still surfaced by `glua_check`).
-- **Field-access narrowing doesn't propagate.** `if not (data.Src and data.Dir and data.Distance) then return end` does NOT narrow `data.Src`/`Dir`/`Distance` on the lines below. To narrow, copy each into a local first, then null-check the locals, separated by lines (`if not src then return end` then `if not dir then return end` rather than a combined `and`-chain). Then use the locals downstream and reassign to `data.X` only when you genuinely want to mutate the input.
-- **Trace struct casts.** Inline-built tables passed to `util.TraceLine`/`RealTraceLine` may not match the `Trace` struct because field-type narrowing is partial. When the surrounding logic is correct, an inline `--[[@as Trace]]` cast on the closing brace is cleaner than restructuring.
-- **`.luatypes/`** — local LuaLS workspace stubs, picked up by `.luarc.json` `workspace.library`.
-  - `glua_overrides.lua` aliases the integer enums (`COLLISION_GROUP`, `FORCE`, `STENCILOPERATION`, `STENCILCOMPARISONFUNCTION`) — glua-api-snippets ships them as string-literal unions, which breaks calls like `self:SetCollisionGroup(COLLISION_GROUP_WORLD)`. Also adds the missing 2-arg `table.insert(tbl, value)` overload (the upstream stub only declares the 3-arg form, so `table.insert(narrowly_typed_array, x)` mis-resolves and treats `x` as the position).
-  - `vrmod.lua` declares the optional VR addon's three globals used here. All call sites guard with `if vrmod then`.
-
-There is intentionally **no `diagnostics.disable` block in `.luarc.json`** — every rule earns its keep. Prefer code-level fixes or targeted annotations over global suppression.
-
-### Claude Code LSP integration (`glua-lsp` plugin)
-
-Diagnostics, hover, and jump-to-definition are provided via the [`glua-lsp` plugin](https://github.com/AmyJeanes/gmod-claude-plugins) (marketplace: `AmyJeanes/gmod-claude-plugins`). The plugin wraps the [`glua_ls`](https://github.com/Pollux12/gmod-glua-ls) language server — same EmmyLua-Analyzer-Rust engine as `glua_check`, just running long-lived. Diagnostics arrive automatically after every edit; no hook involvement.
-
-`.claude/settings.json` declares `extraKnownMarketplaces` so contributors get prompted to install the plugin on first open. The plugin itself ships only configuration — two per-machine pieces are still needed and are not in source control.
-
-#### First-time setup (do this before doing other work)
-
-`scripts/install-tools.ps1` is the single source of truth for `glua_check`, `glua_ls`, and the GLua API stubs. Versions are pinned at the top of the script and shared with CI, so local and CI run the exact same engine.
-
-In a fresh clone, run it once before touching `.lua` files:
-
-```bash
-pwsh -File scripts/install-tools.ps1
-```
-
-It is idempotent — re-running is a no-op when the pinned versions are already present, so it's also the recovery path when LSP diagnostics look wrong. The `glua-lsp` Claude Code plugin auto-resolves `glua_ls` from this project's `.tools/bin/` at LSP launch (no PATH plumbing needed); after a fresh install just `/reload-plugins`.
-
-To bump a version: edit the `$GluaLsVersion` / `$GluaApiVersion` constants in `scripts/install-tools.ps1`, commit, and CI + every fresh clone picks it up. Renovate (`renovate.json` customManagers) also raises bump PRs automatically, gated by the GLua Check CI job.
-
-The `glua-lsp:install-glua-ls` skill covers the same recovery flow if symptoms appear later. Treat reported diagnostics as actionable only if the edit caused them — pre-existing noise on unrelated lines is not in scope for the current change.
-
-#### Workspace-wide scans with `glua_check`
-
-`glua_ls` only analyzes files as they are opened/edited. To audit the whole repo at once, use `scripts/glua-check.ps1` — it installs the pinned tooling on demand (no-op when present) and runs `glua_check --warnings-as-errors` against the repo. CI calls the same script.
-
-```bash
-pwsh -File scripts/glua-check.ps1
-```
-
-`glua_check` only accepts a workspace root, not file/path filters, so the script always scans the whole repo.
-
-Useful when a fix has rippled across the codebase or when picking up the project to find latent issues the LSP hasn't surfaced yet.
+**No `diagnostics.disable` in `.luarc.json`** — every rule earns its keep; prefer code fixes or targeted annotations over global suppression.

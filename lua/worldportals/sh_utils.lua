@@ -1,10 +1,4 @@
-
--- Checks if an object's position is behind a plane
-function wp.IsBehind( object_pos, plane_pos, plane_forward )
-    return plane_forward.x * (object_pos.x - plane_pos.x)
-        + plane_forward.y * (object_pos.y - plane_pos.y)
-        + plane_forward.z * (object_pos.z - plane_pos.z) < 0
-end
+-- Utils
 
 ---@return number
 local function arctan2(y, x)
@@ -71,6 +65,7 @@ function wp.DistanceToPlane( object_pos, plane_pos, plane_forward )
 end
 
 local ANGLE_YAW_180 = Angle(0, 180, 0)
+local ANGLE_ZERO = Angle(0, 0, 0)
 local VECTOR_ORIGIN = Vector()
 local VECTOR_UP = Vector(0, 0, 1)
 
@@ -91,14 +86,19 @@ function wp.TransformPortalPos( vec, portal, exit_portal )
 
 end
 
--- Transforms a vector from one portal to another
+-- Transforms a vector (direction) through a portal pair: same WorldToLocal ->
+-- 180-yaw mirror -> LocalToWorld pipeline as the position/angle transforms, so
+-- it's a real rotation at any pitch/roll (Euler-angle subtraction would flip
+-- velocity on pitched/rolled pairs).
 function wp.TransformPortalVector( vec, portal, exit_portal )
 
-    local rotate_ang = exit_portal:GetAngles() - portal:GetAngles()
-    rotate_ang = rotate_ang + ANGLE_YAW_180 + exit_portal:GetExitAngOffset()
-    vec:Rotate( rotate_ang )
+    -- Direction-only: zero origin so only the rotation applies. WorldToLocal
+    -- returns a fresh vector, so the caller's input is untouched.
+    local l_vec = WorldToLocal( vec, ANGLE_ZERO, VECTOR_ORIGIN, portal:GetAngles() )
+    l_vec:Rotate( ANGLE_YAW_180 )
+    local w_vec = LocalToWorld( l_vec, ANGLE_ZERO, VECTOR_ORIGIN, exit_portal:GetAngles() + exit_portal:GetExitAngOffset() )
 
-    return vec
+    return w_vec
 
 end
 
@@ -120,7 +120,7 @@ function wp.GetFirstPortalHit(source, direction)
         Distance = 0,
         HitPos = Vector(0,0,0)
     }
-    for _,v in pairs(ents.FindByClass("linked_portal_door")) do
+    for _, v in ipairs(wp.portals) do
         if v.GetExit and IsValid(v:GetExit()) then
             local hitPos = util.IntersectRayWithPlane(source, direction, v:GetPos(), v:GetForward())
 

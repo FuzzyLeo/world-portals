@@ -1,20 +1,25 @@
+-- Render
 
--- Setup variables
 wp.matBlack = Material( "wp/black" )
 wp.matTrans = Material( "wp/trans" )
 wp.matInvis = Material( "wp/invis" )
-wp.matView = CreateMaterial(
-    "UnlitGeneric",
-    "GMODScreenspace",
-    {
-        [ "$basetexturetransform" ] = "center .5 .5 scale -1 -1 rotate 0 translate 0 0",
-        [ "$texturealpha" ] = "0",
-        [ "$vertexalpha" ] = "1",
-    }
-)
 wp.matView2 = CreateMaterial("WorldPortals", "Core_DX90", {["$basetexture"] = wp.matBlack:GetName(), ["$model"] = "1", ["$nocull"] = "1"})
 
-wp.portals = {}
+-- Material that paints the exit-view RT into the portal opening (cl_init.lua). DrawScreenQuad
+-- fills the active eye's sub-viewport, but its texture coords span the whole render target, so a
+-- stereo/VR eye reads only its half - $basetexturetransform (wp.uvRemapMatrix) remaps the eye's
+-- slice back to the full view. $translucent lets the per-draw $alpha (cl_init.lua) carry transparency.
+wp.matViewUV = CreateMaterial("WorldPortals_ViewUV", "UnlitGeneric", {
+    ["$basetexture"] = wp.matBlack:GetName(),
+    ["$ignorez"] = "1",
+    ["$nocull"] = "1",
+    ["$vertexalpha"] = "1",
+    ["$translucent"] = "1",
+})
+
+-- Reused per-eye texture-coord remap matrix for painting the exit view (see cl_init.lua / matViewUV).
+wp.uvRemapMatrix = Matrix()
+
 wp.drawing = true --default portals to not draw
 wp.rendermode = false
 local WEAPON_COLOR_OFF = Vector(0, 0, 0)
@@ -28,6 +33,7 @@ wp._renderView = {
     w = 0,
     h = 0,
     fov = 0,
+    aspectratio = nil,
     origin = nil,
     angles = nil,
     dopostprocess = false,
@@ -39,7 +45,7 @@ wp._renderView = {
     zfar = nil,
 }
 
-CreateClientConVar("worldportals_enabled", "1", true, false, "Enable World Portals rendering. When 0, portals don't render and entity Draw bails — frees the per-frame engine RenderView allocations the recursion produces.", 0, 1)
+CreateClientConVar("worldportals_enabled", "1", true, false, "Enable World Portals rendering. When 0, portals don't render and entity Draw bails - frees the per-frame engine RenderView allocations the recursion produces.", 0, 1)
 CreateClientConVar("worldportals_recurse_depth", "2", true, false, "World Portals - Maximum portal recursion depth", 1, 9)
 
 local enabled = true
@@ -88,7 +94,7 @@ local function quantizePos(v)
 end
 
 -- Identifies which RT a (depth, camera, portal) triple maps to. At d=1 the
--- camera is omitted (only one chain — the player view — so the RT stays
+-- camera is omitted (only one chain - the player view - so the RT stays
 -- stable across frames). At d>1 the camera is folded in so sibling chains
 -- with different cameras get distinct RTs and identical ones dedup.
 local function getChainKey(depth, camPos, portal)
@@ -118,15 +124,42 @@ local function getChainKey(depth, camPos, portal)
     return key
 end
 
--- Bounded LRU pool of RTs for d>1 renders. GetRenderTarget allocates a GPU
--- surface per unique name and the engine never frees them, so per-portal
--- caching across many quantized cameras would leak unboundedly. d=1 RTs
--- stay per-portal-stable so portal:SetTexture keeps working downstream.
-local rtPool = {}
-local rtPoolCount = 0
-local rtPoolNextSlot = 0
-local rtPoolMaxSize = 32
+-- Key for the render-decision cache. Unlike getChainKey, always folds the camera
+-- in, so a second d=1 view in the same frame (a TARDIS scanner, a security
+-- monitor) gets its own decision instead of reusing the eye view's. Separate
+-- per-portal key fields so the two caches can't clobber each other.
+local function getDecisionKey(depth, camPos, portal)
+    if not camPos then return getChainKey(depth, nil, portal) end
+    local qx, qy, qz = quantizePos(camPos)
+    if portal.WPDecKeyDepth == depth
+        and portal.WPDecKeyQX == qx
+        and portal.WPDecKeyQY == qy
+        and portal.WPDecKeyQZ == qz
+    then
+        return portal.WPDecKey
+    end
+    local key = "dec:" .. depth .. ":" .. qx .. "_" .. qy .. "_" .. qz .. ":" .. portal:EntIndex()
+    portal.WPDecKeyDepth = depth
+    portal.WPDecKeyQX = qx
+    portal.WPDecKeyQY = qy
+    portal.WPDecKeyQZ = qz
+    portal.WPDecKey = key
+    return key
+end
+
+-- Pool of d>1 exit-view RTs, bucketed by resolution. GetRenderTarget surfaces are
+-- immortal (never freed), so each bucket caps at RT_POOL_PER_RES and LRU-recycles its
+-- own. The resolution split isn't tidiness: a named surface is size-locked, so without
+-- it a mono chain and a smaller stereo/VR eye chain collide on one key and remint a
+-- fresh immortal surface every frame of movement - the stereoscopy leak/crash. 16
+-- covers depth-9 stereo (8 levels x 2 eyes).
+local RT_POOL_PER_RES = 16
+local resPools = {}        -- resTag -> { count, nextSlot, entries = { chainKey -> {rt, lastGen} } }
 local frameCounter = 0
+-- Bumped per top-level view (mono eye, or each stereo/VR eye). LRU eviction recycles
+-- only a prior view's surface (lastGen < viewGen), so the current view's in-flight
+-- RTs aren't stolen.
+local viewGen = 0
 
 hook.Add("PreRender", "WorldPortals_AdvanceFrame", function()
     frameCounter = frameCounter + 1
@@ -159,9 +192,8 @@ local function cachePortalScalars(p)
     p.WPEAOffP, p.WPEAOffY, p.WPEAOffR = eao.p, eao.y, eao.r
     p.WPCacheFrame = frameCounter
 end
-wp.CachePortalScalars = cachePortalScalars
 
--- Static scratch buffers — mutated per call but never retained by engine.
+-- Static scratch buffers - mutated per call but never retained by engine.
 local EXIT_ANG_BUF = Angle()
 local EXIT_ANG_OFF_BUF = Angle()
 local VECTOR_ORIGIN = Vector()
@@ -248,54 +280,46 @@ end
 wp.TransformPortalAngleInto = transformPortalAngleInto
 
 local function getPooledRT(chainKey, width, height)
-    local entry = rtPool[chainKey]
-    if entry and entry.width == width and entry.height == height then
-        entry.lastFrame = frameCounter
-        return entry.rt
-    end
-    -- Resolution changed; drop and reallocate.
-    if entry then
-        rtPool[chainKey] = nil
-        rtPoolCount = rtPoolCount - 1
+    local tag = math.floor(width) .. "x" .. math.floor(height)
+    local bucket = resPools[tag]
+    if not bucket then
+        bucket = { count = 0, nextSlot = 0, entries = {} }
+        resPools[tag] = bucket
     end
 
-    if rtPoolCount < rtPoolMaxSize then
-        local rt = GetRenderTarget("wp_chain_pool_" .. rtPoolNextSlot, width, height)
-        rtPoolNextSlot = rtPoolNextSlot + 1
-        rtPool[chainKey] = { rt = rt, lastFrame = frameCounter, width = width, height = height }
-        rtPoolCount = rtPoolCount + 1
+    local entry = bucket.entries[chainKey]
+    if entry then
+        entry.lastGen = viewGen
+        return entry.rt
+    end
+
+    if bucket.count < RT_POOL_PER_RES then
+        local rt = GetRenderTarget("wp_chain_pool_" .. tag .. "_" .. bucket.nextSlot, width, height)
+        bucket.nextSlot = bucket.nextSlot + 1
+        bucket.entries[chainKey] = { rt = rt, lastGen = viewGen }
+        bucket.count = bucket.count + 1
         return rt
     end
 
-    -- Evict LRU, but never a current-frame entry (still in flight). If
-    -- everything's current we're over capacity — skip the render.
-    local lruKey, lruFrame
-    for k, e in pairs(rtPool) do
-        if e.lastFrame < frameCounter and (not lruKey or e.lastFrame < lruFrame) then
-            lruKey, lruFrame = k, e.lastFrame
+    -- At capacity: recycle the least-recently-used surface from a PRIOR view (a
+    -- current-view entry is still in flight this pass). Same bucket = same size, so
+    -- the recycled surface is always usable.
+    local lruKey, lruGen
+    for k, e in pairs(bucket.entries) do
+        if e.lastGen < viewGen and (not lruKey or e.lastGen < lruGen) then
+            lruKey, lruGen = k, e.lastGen
         end
     end
     if not lruKey then return nil end
 
-    local victim = rtPool[lruKey]
+    local victim = bucket.entries[lruKey]
     if not victim then return nil end
-    rtPool[lruKey] = nil
-    if victim.width ~= width or victim.height ~= height then
-        -- Wrong size; reallocating would defeat pooling. Skip instead.
-        rtPoolCount = rtPoolCount - 1
-        return nil
-    end
-    rtPool[chainKey] = { rt = victim.rt, lastFrame = frameCounter, width = width, height = height }
+    bucket.entries[lruKey] = nil
+    bucket.entries[chainKey] = { rt = victim.rt, lastGen = viewGen }
     return victim.rt
 end
 
-function wp.GetPortalPoolStats()
-    return rtPoolCount, rtPoolMaxSize
-end
-
 ---@return ITexture?
----@return number width
----@return number height
 function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     depth = ClampRecurseDepth(depth)
     width = width or ScrW()
@@ -306,23 +330,20 @@ function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     if depth <= 1 then
         local texture = portal.WPTexture1
         if texture and portal.WPTexture1Width == width and portal.WPTexture1Height == height then
-            return texture, width, height
+            return texture
         end
         texture = GetRenderTarget("portal:" .. portal:EntIndex() .. ":d1:" .. width .. ":" .. height, width, height)
         portal.WPTexture1 = texture
         portal.WPTexture1Width = width
         portal.WPTexture1Height = height
-        if texture then return texture, width, height end
-        return texture, width, height
+        return texture
     end
 
     chainKey = chainKey or (depth .. ":" .. portal:EntIndex())
-    return getPooledRT(chainKey, width, height), width, height
+    return getPooledRT(chainKey, width, height)
 end
 
 ---@return ITexture
----@return number width
----@return number height
 ---@return number depth
 function wp.GetPortalDrawTexture(portal)
     local depth = wp.drawtexturedepth or 1
@@ -330,14 +351,12 @@ function wp.GetPortalDrawTexture(portal)
     local chainKey = portal.WPLastDrawChainDepth == depth and portal.WPLastDrawChainCam == camPos and portal.WPLastDrawChainKey or getChainKey(depth, camPos, portal)
     if portal.WPLastRenderedChainKey == chainKey
         and portal.WPLastRenderedDepth == depth
-        and portal.WPLastRenderedWidth
-        and portal.WPLastRenderedHeight
         and portal.WPLastRenderedTexture
     then
-        return portal.WPLastRenderedTexture, portal.WPLastRenderedWidth, portal.WPLastRenderedHeight, depth
+        return portal.WPLastRenderedTexture, depth
     end
-    local texture, width, height = wp.GetPortalTexture(portal, wp.viewwidth or ScrW(), wp.viewheight or ScrH(), depth, chainKey)
-    return texture, width, height, depth
+    local texture = wp.GetPortalTexture(portal, wp.viewwidth or ScrW(), wp.viewheight or ScrH(), depth, chainKey)
+    return texture, depth
 end
 
 -- Chain keys whose RT was filled this frame. renderportals uses it to dedup
@@ -370,7 +389,7 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     if not camFOV then camFOV = LocalPlayer():GetFOV() end
 
     local cacheDepth = wp.drawtexturedepth or wp.renderdepth or 1
-    local cacheKey = getChainKey(cacheDepth, camOrigin, portal)
+    local cacheKey = getDecisionKey(cacheDepth, camOrigin, portal)
     local cached = frameShouldRenderCache[cacheKey]
     if cached ~= nil then
         return (cached % 2) == 1, cached >= 2
@@ -418,7 +437,7 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
         end
     end
 
-    -- Back-face cull. Use the thick-portal back-plane only at d=1 — at d>1
+    -- Back-face cull. Use the thick-portal back-plane only at d=1 - at d>1
     -- the inner camera lands inside the exit's thick volume by construction
     -- and would bounce-recurse forever.
     local thickness = portal:GetThickness()
@@ -459,10 +478,26 @@ function WorldPortals_RenderView(view)
     local angles = v.angles or EyeAngles()
     local width = v.width or v.w or ScrW()
     local height = v.height or v.h or ScrH()
-    local fov = v.fov or LocalPlayer():GetFOV()
+    local aspect = v.aspectratio or (width / height)
+    local fov = v.fov
+    if not fov then
+        -- A view with no fov (a stereo/VR eye) must match the engine's actual rendered fov:
+        -- the aspect-corrected Hor+ value, not raw GetFOV() (the 4:3 reference), or the
+        -- through-portal view zooms relative to the eye scene.
+        fov = math.deg(2 * math.atan(math.tan(math.rad(LocalPlayer():GetFOV() * 0.5)) * aspect / (4 / 3)))
+    end
 
-    if not wp.drawing then
-        wp.renderportals(origin, angles, width, height, fov, 1)
+    -- wp.drawing is true only inside a portal rendering its own exit RT (renderportals
+    -- sets it before recursing); a top-level eye - each stereo/VR eye included, as those
+    -- also route through render.RenderView - has it false and needs the stencil path.
+    local nested = wp.drawing
+
+    if not nested then
+        -- Each top-level view (each stereo/VR eye is its own render.RenderView) needs its
+        -- own RTs. frameRenderedChains dedups within one view's recursion, but its d=1 key
+        -- omits the camera - so without clearing, a later eye reuses the first eye's RTs.
+        for k in pairs(frameRenderedChains) do frameRenderedChains[k] = nil end
+        wp.renderportals(origin, angles, width, height, fov, 1, nil, nil, nil, nil, aspect)
     end
 
     local oldRenderMode = wp.rendermode
@@ -471,13 +506,30 @@ function WorldPortals_RenderView(view)
     local oldViewFOV = wp.viewfov
     local oldViewWidth = wp.viewwidth
     local oldViewHeight = wp.viewheight
+    local oldViewportX = wp.viewportX
+    local oldViewportY = wp.viewportY
+    local oldViewportW = wp.viewportW
+    local oldViewportH = wp.viewportH
+    local oldViewportRTW = wp.viewportRTW
+    local oldViewportRTH = wp.viewportRTH
 
-    wp.rendermode = true
+    wp.rendermode = nested
     wp.vieworigin = origin
     wp.viewangle = angles
     wp.viewfov = fov
     wp.viewwidth = width
     wp.viewheight = height
+    -- This eye's pixel rect on the active render target, where cl_init.lua paints the
+    -- portal RT: a sub-rect of vrmod's shared two-eye buffer in VR, of the back buffer
+    -- in stereoscopy, or the whole screen in mono.
+    wp.viewportX = v.x or 0
+    wp.viewportY = v.y or 0
+    wp.viewportW = width
+    wp.viewportH = height
+    -- Size of that full target: ScrW/ScrH here is the whole pushed buffer (both eyes in
+    -- VR), which the per-eye texture-coord remap needs.
+    wp.viewportRTW = ScrW()
+    wp.viewportRTH = ScrH()
     render.RealRenderView(view)
     wp.rendermode = oldRenderMode
     wp.vieworigin = oldViewOrigin
@@ -485,6 +537,12 @@ function WorldPortals_RenderView(view)
     wp.viewfov = oldViewFOV
     wp.viewwidth = oldViewWidth
     wp.viewheight = oldViewHeight
+    wp.viewportX = oldViewportX
+    wp.viewportY = oldViewportY
+    wp.viewportW = oldViewportW
+    wp.viewportH = oldViewportH
+    wp.viewportRTW = oldViewportRTW
+    wp.viewportRTH = oldViewportRTH
 end
 
 render.RenderView = WorldPortals_RenderView
@@ -553,7 +611,7 @@ end
 -- Project a portal's visible-face quad through a camera into screen pixel
 -- space, near-plane-clipped. Returns a flat polygon (0, 6, 8, or 10 entries).
 -- camFov is the rendered horizontal FOV (already aspect-adjusted by the
--- engine — don't re-apply Hor+ here).
+-- engine - don't re-apply Hor+ here).
 --
 -- Single-slot cache for the camera basis: renderportals iterates many
 -- portals per level sharing one plyAngle, so subsequent calls skip the
@@ -563,7 +621,13 @@ local lastCamFwdX, lastCamFwdY, lastCamFwdZ = 0, 0, 0
 local lastCamRtX, lastCamRtY, lastCamRtZ = 0, 0, 0
 local lastCamUpX, lastCamUpY, lastCamUpZ = 0, 0, 0
 
-function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
+-- sw/sh are the projection space the polygon is measured in. They MUST be stable
+-- across one recursion (the cull intersects a parent and child poly), so renderportals
+-- passes its view width/height - NOT ScrW()/ScrH(), which silently changes the moment a
+-- portal render target is pushed (a stereoscopy/VR eye RT is smaller than the screen, so
+-- ancestor polys built pre-push and child polys built post-push would be in different
+-- spaces and never intersect). Defaults to the screen for the debug overlay.
+function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect, sw, sh)
     local cap, cay, car = camAng.p, camAng.y, camAng.r
     if cap ~= lastCamP or cay ~= lastCamY or car ~= lastCamR then
         local f = camAng:Forward()
@@ -580,16 +644,21 @@ function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
     local tanHalfH = math.tan(camFov * math.pi / 360)
     local tanHalfV = tanHalfH / aspect
 
-    local sw, sh = ScrW(), ScrH()
+    sw = sw or ScrW()
+    sh = sh or ScrH()
     local out = acquirePoly()
 
     cachePortalScalars(portal)
     local hw = portal:GetWidth() * 0.5
     local hh = portal:GetHeight() * 0.5
-    -- Visible face sits at pos - fwd*5 (matches DrawQuadEasy in cl_init.lua).
-    local cx = portal.WPPosX - portal.WPFwdX * 5
-    local cy = portal.WPPosY - portal.WPFwdY * 5
-    local cz = portal.WPPosZ - portal.WPFwdZ * 5
+    -- Project the portal's front face - the furthest extent along forward, read from the
+    -- render geometry (RenderMin/Max). A flat or box front sits on the plane; an inverted
+    -- portal's front is recessed, so a fixed offset can't match every shape's stencil.
+    local rmin, rmax = portal.RenderMin, portal.RenderMax
+    local frontOff = (rmin and rmax) and math.max(rmin.x, rmax.x) or 0
+    local cx = portal.WPPosX + portal.WPFwdX * frontOff
+    local cy = portal.WPPosY + portal.WPFwdY * frontOff
+    local cz = portal.WPPosZ + portal.WPFwdZ * frontOff
     local rx = portal.WPRtX * hw
     local ry = portal.WPRtY * hw
     local rz = portal.WPRtZ * hw
@@ -622,10 +691,6 @@ local function polygonSignedArea(poly)
         prevX, prevY = x, y
     end
     return sum * 0.5
-end
-
-function wp.PolygonArea(poly)
-    return math.abs(polygonSignedArea(poly))
 end
 
 local function reversePolygonInto(src, dst)
@@ -763,27 +828,51 @@ hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
     frameCulledCount = 0
 end)
 
-function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd )
+-- The scene render leaves specular/HDR data in the RT's alpha channel; the translucent
+-- exit-view draw (cl_init.lua) would read that as opacity and show the nearest surfaces as
+-- fake translucency. Flatten alpha to 255 (RGB untouched) so the draw's opacity is clean -
+-- solid where opaque, the portal's transparency where not.
+local function flattenRTAlpha(width, height)
+    render.OverrideColorWriteEnable(true, false)
+    render.OverrideAlphaWriteEnable(true, true)
+    cam.Start2D()
+        surface.SetDrawColor(255, 255, 255, 255)
+        surface.DrawRect(0, 0, width, height)
+    cam.End2D()
+    render.OverrideAlphaWriteEnable(false, false)
+    render.OverrideColorWriteEnable(false, false)
+end
+
+function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd, parentPortal, aspect )
     if ( wp.drawing ) then return end
     if not enabled then return end
 
     depth = ClampRecurseDepth(depth)
+    -- A new top-level view starts here (the mono eye, or each stereoscopy/VR eye).
+    -- Advance the pool generation so this view can reclaim the previous view's
+    -- already-consumed RTs instead of starving behind them (see viewGen).
+    if depth <= 1 then viewGen = viewGen + 1 end
     if depth > recurseDepth then return end
 
     local oldRenderDepth = wp.renderdepth
     wp.renderdepth = depth
 
-    if depth == 1 or not wp.portals then
-        wp.portals = ents.FindByClass( "linked_portal_door" )
-    end
+    -- The portal whose view we're rendering right now (nil for the player's own
+    -- view). A consumer reads it to tell which portal the current render is for -
+    -- e.g. an interior hiding its own portals while we render the view through its door.
+    local oldRenderParent = wp.renderparent
+    wp.renderparent = parentPortal
 
     local portals = wp.portals
     if ( not portals ) then
         wp.renderdepth = oldRenderDepth
+        wp.renderparent = oldRenderParent
         return
     end
 
-    local aspect = width / height
+    -- The eye's true aspectratio (VR sets one that differs from w/h); the RT must
+    -- render at it so the through-portal view lines up vertically with the eye scene.
+    aspect = aspect or (width / height)
 
     -- Suppress phys gun glow/beam during the portal renders.
     local ply = LocalPlayer()
@@ -824,45 +913,35 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             end
 
             if not clipped then
-                if depth == 1 then
-                    -- No ancestor; compute poly once for children to clip against.
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
-                    if #poly < 6 then
+                poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
+                if #poly < 6 then
+                    releasePoly(poly); poly = nil
+                elseif parentPoly then
+                    cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
+                    if #cumulativePoly < 6 then
+                        -- Hidden behind ancestor stencil chain.
+                        if recordRenders then
+                            local slot = frameCulledList[frameCulledCount + 1]
+                            if not slot then
+                                slot = {camOrigin = Vector(), camAngle = Angle()}
+                                frameCulledList[frameCulledCount + 1] = slot
+                            end
+                            slot.portal = portal
+                            slot.depth = depth
+                            slot.fov = fov
+                            slot.camOrigin:Set(plyOrigin)
+                            slot.camAngle:Set(plyAngle)
+                            frameCulledCount = frameCulledCount + 1
+                        end
                         releasePoly(poly); poly = nil
+                        releasePoly(cumulativePoly); cumulativePoly = nil
                     else
-                        cumulativePoly = poly
                         shouldRender = true
                     end
                 else
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
-                    if #poly < 6 then
-                        releasePoly(poly); poly = nil
-                    elseif parentPoly then
-                        cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
-                        if #cumulativePoly < 6 then
-                            -- Hidden behind ancestor stencil chain.
-                            if recordRenders then
-                                local slot = frameCulledList[frameCulledCount + 1]
-                                if not slot then
-                                    slot = {camOrigin = Vector(), camAngle = Angle()}
-                                    frameCulledList[frameCulledCount + 1] = slot
-                                end
-                                slot.portal = portal
-                                slot.depth = depth
-                                slot.fov = fov
-                                slot.camOrigin:Set(plyOrigin)
-                                slot.camAngle:Set(plyAngle)
-                                frameCulledCount = frameCulledCount + 1
-                            end
-                            releasePoly(poly); poly = nil
-                            releasePoly(cumulativePoly); cumulativePoly = nil
-                        else
-                            shouldRender = true
-                        end
-                    else
-                        cumulativePoly = poly
-                        shouldRender = true
-                    end
+                    -- No ancestor (depth 1): this poly seeds the children's clip.
+                    cumulativePoly = poly
+                    shouldRender = true
                 end
             end
         end
@@ -878,8 +957,6 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             frameRenderedChains[chainKey] = true
             portal.WPLastRenderedChainKey = chainKey
             portal.WPLastRenderedDepth = depth
-            portal.WPLastRenderedWidth = width
-            portal.WPLastRenderedHeight = height
             portal.WPLastRenderedTexture = texture
 
             -- Record for the debug overlay; reuses slots across frames.
@@ -959,7 +1036,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     local childDepth = depth + 1
                     local drawPortalsInView = childDepth <= recurseDepth
                     if drawPortalsInView then
-                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward)
+                        wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward, portal, aspect)
                     end
 
                     local oldDrawing = wp.drawing
@@ -978,6 +1055,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     rv.w = width
                     rv.h = height
                     rv.fov = fov
+                    rv.aspectratio = aspect
                     rv.origin = camOrigin
                     rv.angles = camAngle
                     rv.zfar = zfar
@@ -996,6 +1074,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 
                     render.PopCustomClipPlane()
                     render.EnableClipping( oldClip )
+                    flattenRTAlpha( width, height )
                 render.PopRenderTarget()
 
                 hook.Call( "wp-postrender", GAMEMODE, portal, exitPortal, plyOrigin, depth )
@@ -1019,14 +1098,31 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
         ply:SetWeaponColor( oldWepColor )
     end
     wp.renderdepth = oldRenderDepth
+    wp.renderparent = oldRenderParent
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
+    -- In VR, vrmod renders the eyes itself and shows one on the desktop, so this normal
+    -- full-screen pass just fills RTs nothing displays - skip the wasted work.
+    if vrmod and vrmod.IsPlayerInVR() then return end
+    -- Mono fills the whole screen; each stereo/VR eye overrides these per-eye in
+    -- WorldPortals_RenderView.
+    wp.viewportX, wp.viewportY = 0, 0
+    wp.viewportW, wp.viewportH = ScrW(), ScrH()
+    wp.viewportRTW, wp.viewportRTH = ScrW(), ScrH()
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 
+-- While a portal's exit-view renders into its RT (wp.drawing), draw the local
+-- player's model so your body shows up in portals (e.g. a portal whose pair points
+-- back at you, or recursive views). Outside that - the normal eye view - this
+-- returns nil, so the engine keeps first-person bodiless as usual.
+local cvShowSelf = CreateClientConVar("worldportals_show_self", "1", true, false, "Show your own body inside portals", 0, 1)
 hook.Add( "ShouldDrawLocalPlayer", "WorldPortals_Render", function()
     if wp.drawing then
+        -- Toggle off => keep yourself out of portal RTs. (The mid-teleport ghost
+        -- half is gated by this same convar, separately, in cl_ghosts.lua.)
+        if not cvShowSelf:GetBool() then return false end
         return true
     end
 end )

@@ -5,12 +5,10 @@ AddCSLuaFile( "shared.lua" )
 include( "shared.lua" )
 
 AccessorFunc( ENT, "partnername", "PartnerName" )
-AccessorFunc( ENT, "enableteleport", "EnableTeleport", FORCE_BOOL )
 
 util.AddNetworkString("WorldPortals_VRMod_SetAngle")
 util.AddNetworkString("WorldPortals_Teleport")
 
--- Collect properties
 function ENT:KeyValue( key, value )
     if ( key == "partnername" ) then
         self:SetPartnerName( value )
@@ -57,40 +55,42 @@ function ENT:KeyValue( key, value )
     end
 end
 
--- Teleportation
+-- Teleportation for non-player entities (props/NPCs/ragdolls) only - players go
+-- through the predicted SetupMove path in sh_teleport.lua.
 function ENT:Touch( ent )
     if (not self:GetOpen()) or (not self:GetEnableTeleport()) then return end
+    if ent:IsPlayer() then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
-    
-    if IsValid( self:GetParent() ) then
-        local ents = constraint.GetAllConstrainedEntities( self:GetParent() ) -- don't mess up this contraption we're on
-        for _,v in pairs( ents ) do
-            if v == ent then
-                return
-            end
+    if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
+
+    -- Don't teleport or phase a prop that's part of the contraption this portal rides
+    -- on. Skip the check for an already-armed prop: its pass-through NoCollide is
+    -- itself a constraint, so the prop self-registers in the parent's network and
+    -- would wrongly match here - yet it armed only after passing this check clean.
+    if IsValid( self:GetParent() ) and not (wp.nocollide[ent] and wp.nocollide[ent][self]) then
+        for _,v in pairs( constraint.GetAllConstrainedEntities( self:GetParent() ) ) do
+            if v == ent then return end
         end
     end
-    local vel_norm = ent:GetVelocity():GetNormalized()
 
-    -- Object is moving towards the portal
-    if vel_norm:Dot( self:GetForward() ) < 0 then
+    -- Arm the parent pass-through for any dynamic or physgun-held prop, in any
+    -- direction (a held prop's velocity wanders). Static props excluded; wp-shouldtp
+    -- guards the structure.
+    local entphys = ent:GetPhysicsObject()
+    if (IsValid(entphys) and entphys:GetVelocity():LengthSqr() > 25) or ent:IsPlayerHolding() then
+        wp.ArmNoCollide(self, ent)
+    end
 
-        local projected_distance = wp.DistanceToPlane( ent:EyePos(), self:GetPos(), self:GetForward() )
-
-        if projected_distance < 0 and hook.Call("wp-shouldtp",GAMEMODE,self,ent)~=false then
+    -- Teleport only when the prop is crossing toward the exit, else it ping-pongs.
+    if ent:GetVelocity():GetNormalized():Dot( self:GetForward() ) >= 0 then return end
+    local projected_distance = wp.DistanceToPlane( ent:EyePos(), self:GetPos(), self:GetForward() )
+    if projected_distance < 0 then
 
             local new_pos = wp.TransformPortalPos( ent:GetPos(), self, exit )
             local new_velocity = wp.TransformPortalVector( ent:GetVelocity(), self, exit )
             local new_angle = wp.TransformPortalAngle( ent:GetAngles(), self, exit )
-            if ent:IsPlayer() then
-                local height = ent:OBBMaxs().z
-                local temppos = Vector(0,0,height)
-                temppos:Rotate(Angle(0,0,new_angle.r))
-                new_pos = new_pos + Vector(0,0,(temppos.z - height) / 2) 
-            end
-        
-            
+
             ---@type table<integer, {[1]: Vector, [2]: Angle}>?
             local store
             if ent:IsRagdoll() then
@@ -103,26 +103,17 @@ function ENT:Touch( ent )
                 end
             end
             ent:SetPos( new_pos )
-            if ent:IsPlayer() then
-                if vrmod and vrmod.IsPlayerInVR(ent) then
-                    net.Start("WorldPortals_VRMod_SetAngle")
-                        net.WriteDouble(wp.TransformPortalAngle(Angle(0,0,0), self, exit).y)
-                    net.Send(ent)
-                end
-                ent:SetEyeAngles( Angle(new_angle.p, new_angle.y, 0) )
-                ent:SetLocalVelocity( new_velocity )
-                wp.AlertPlayerOnTeleport( ent, new_angle.r )
-                self:TriggerOutput("OnPlayerTeleportFromMe", ent)
-                exit:TriggerOutput("OnPlayerTeleportToMe", ent)
-            else
-                ent:SetAngles( new_angle )
+            ent:SetAngles( new_angle )
+            ent:SetVelocity( new_velocity )
+            local phys = ent:GetPhysicsObject()
+            if IsValid(phys) then phys:SetVelocityInstantaneous( new_velocity ) end
 
-                ent:SetVelocity( new_velocity )
-                local phys = ent:GetPhysicsObject()
-                if IsValid(phys) then phys:SetVelocityInstantaneous( new_velocity ) end
-                self:TriggerOutput("OnEntityTeleportFromMe", ent)
-                exit:TriggerOutput("OnEntityTeleportToMe", ent)
-            end
+            -- Disarm the entry explicitly - a SetPos teleport can skip its EndTouch,
+            -- leaving the prop no-collided against the entry's parent. The exit side
+            -- arms via its own Touch as the prop emerges through it.
+            wp.DisarmNoCollide( ent, self )
+            self:TriggerOutput("OnEntityTeleportFromMe", ent)
+            exit:TriggerOutput("OnEntityTeleportToMe", ent)
             if store then
                 for i=0,ent:GetPhysicsObjectCount() do
                     local bone=ent:GetPhysicsObjectNum(i)
@@ -143,7 +134,53 @@ function ENT:Touch( ent )
                 net.WriteVector(new_pos)
                 net.WriteAngle(new_angle)
             net.Broadcast()
+    end
+end
+
+-- Restore parent collision when the prop leaves the doorway without teleporting
+-- (a teleport already disarms the entry in Touch). Idempotent if both fire.
+function ENT:EndTouch( ent )
+    wp.DisarmNoCollide( ent, self )
+end
+
+-- Create/destroy the portal's linked_portal_frame child (a perimeter physics hull
+-- that funnels transiting props through the opening).
+function ENT:RebuildCollisionFrame()
+    local w, h = self:GetWidth(), self:GetHeight()
+    if w <= 0 or h <= 0 then
+        if IsValid(self.CollisionFrame) then
+            self.CollisionFrame:Remove()
+            self.CollisionFrame = nil
         end
+        return
+    end
+
+    local f = self.CollisionFrame
+    if not IsValid(f) then
+        f = ents.Create("linked_portal_frame")
+        if not IsValid(f) then return end
+        f:SetPos(self:GetPos())
+        f:SetAngles(self:GetAngles())
+        f:Spawn()
+        -- Deliberately NOT parented: the prop<->parent no-collide would disable the
+        -- prop against the parent's whole parented subtree, so a parented frame
+        -- would be phased too. It tracks the portal via its own Think (.Portal);
+        -- WPPortal networks the reference for the client debug overlay.
+        f.Portal = self
+        f:SetNWEntity("WPPortal", self)
+        self.CollisionFrame = f
+    end
+    f:BuildFrame(w, h, self:GetThickness())
+    -- No-collide the (unparented) frame with the parent it sits in NOW, before the
+    -- next physics tick: an overlapping solid hull would interpenetrate that parent
+    -- and the physics solver would violently shove it away. The frame's Think
+    -- re-checks this periodically in case the parent is parented late.
+    wp.NoCollideFrame(f, self)
+end
+
+function ENT:OnRemove()
+    if IsValid(self.CollisionFrame) then
+        self.CollisionFrame:Remove()
     end
 end
 

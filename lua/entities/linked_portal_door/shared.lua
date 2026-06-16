@@ -57,6 +57,12 @@ function ENT:Initialize()
     self:DrawShadow( false )
 
     self:SetupBounds()
+
+    if SERVER then
+        self:RebuildCollisionFrame()
+    end
+
+    wp.RegisterPortal(self)
 end
 
 function ENT:SetupDataTables()
@@ -82,7 +88,34 @@ function ENT:SetupDataTables()
     self:NetworkVar( "Vector", "ModelPos" )
     self:NetworkVar( "Angle", "ModelAng" )
 
-    self:NetworkVarNotify("Width", function(ent, name, old, new) ent:SetupBounds(new) end)
-    self:NetworkVarNotify("Height", function(ent, name, old, new) ent:SetupBounds(nil, new) end)
-    self:NetworkVarNotify("Thickness", function(ent, name, old, new) ent:SetupBounds(nil, nil, new) end)
+    -- Rebuild the server-only collision frame on resize. Pass the new value
+    -- explicitly (the accessor may still read stale here) and only touch an
+    -- already-created frame (initial creation is in Initialize).
+    self:NetworkVarNotify("Width", function(ent, name, old, new)
+        ent:SetupBounds(new)
+        if SERVER and IsValid(ent.CollisionFrame) then
+            ent.CollisionFrame:BuildFrame(new, ent:GetHeight(), ent:GetThickness())
+        end
+    end)
+    self:NetworkVarNotify("Height", function(ent, name, old, new)
+        ent:SetupBounds(nil, new)
+        if SERVER and IsValid(ent.CollisionFrame) then
+            ent.CollisionFrame:BuildFrame(ent:GetWidth(), new, ent:GetThickness())
+        end
+    end)
+    self:NetworkVarNotify("Thickness", function(ent, name, old, new)
+        ent:SetupBounds(nil, nil, new)
+        if SERVER and IsValid(ent.CollisionFrame) then
+            ent.CollisionFrame:BuildFrame(ent:GetWidth(), ent:GetHeight(), new)
+        end
+    end)
+
+    -- Restore parent collision if the portal closes/stops teleporting under a still-
+    -- touching prop (EndTouch only covers the prop leaving).
+    self:NetworkVarNotify("Open", function(ent, name, old, new)
+        if SERVER and not new then wp.DisarmPortal(ent) end
+    end)
+    self:NetworkVarNotify("EnableTeleport", function(ent, name, old, new)
+        if SERVER and not new then wp.DisarmPortal(ent) end
+    end)
 end
