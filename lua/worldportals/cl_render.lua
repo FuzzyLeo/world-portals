@@ -1147,6 +1147,11 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
+    -- vrmod renders both eyes in its own RenderScene hook and blits one to the
+    -- desktop, overriding the default scene - so this full-screen pass would just
+    -- fill portal RTs nothing displays (a wasted full recursion at desktop res,
+    -- the priciest pass). The eyes render via render.RenderView, untouched. Skip it.
+    if vrmod and vrmod.IsPlayerInVR() then return end
     -- The mono eye fills the whole framebuffer (each stereoscopy/VR eye restamps
     -- these from its own sub-viewport in WorldPortals_RenderView).
     wp.viewportX, wp.viewportY = 0, 0
