@@ -5,10 +5,10 @@ wp.matTrans = Material( "wp/trans" )
 wp.matInvis = Material( "wp/invis" )
 wp.matView2 = CreateMaterial("WorldPortals", "Core_DX90", {["$basetexture"] = wp.matBlack:GetName(), ["$model"] = "1", ["$nocull"] = "1"})
 
--- Blit material for the exit-view RT. render.DrawScreenQuad (cl_init.lua) fills the active
--- eye sub-viewport exactly but its UV spans the whole render target, so a stereoscopy/VR eye
--- reads only its half; the blit remaps the eye's UV slice back to [0..1] via this material's
--- $basetexturetransform (wp.blitMatrix). $translucent lets the per-draw $alpha (cl_init.lua) carry portal transparency.
+-- Material that paints the exit-view RT into the portal opening (cl_init.lua). DrawScreenQuad
+-- fills the active eye's sub-viewport, but its texture coords span the whole render target, so a
+-- stereo/VR eye reads only its half - $basetexturetransform (wp.uvRemapMatrix) remaps the eye's
+-- slice back to the full view. $translucent lets the per-draw $alpha (cl_init.lua) carry transparency.
 wp.matViewUV = CreateMaterial("WorldPortals_ViewUV", "UnlitGeneric", {
     ["$basetexture"] = wp.matBlack:GetName(),
     ["$ignorez"] = "1",
@@ -17,8 +17,8 @@ wp.matViewUV = CreateMaterial("WorldPortals_ViewUV", "UnlitGeneric", {
     ["$translucent"] = "1",
 })
 
--- Reused per-eye UV-remap matrix for the RT blit (see cl_init.lua / matViewUV).
-wp.blitMatrix = Matrix()
+-- Reused per-eye texture-coord remap matrix for painting the exit view (see cl_init.lua / matViewUV).
+wp.uvRemapMatrix = Matrix()
 
 wp.drawing = true --default portals to not draw
 wp.rendermode = false
@@ -147,25 +147,18 @@ local function getDecisionKey(depth, camPos, portal)
     return key
 end
 
--- Pool of d>1 RTs, partitioned by render resolution. GetRenderTarget allocates a
--- GPU surface per unique name and the engine never frees them, so caching per
--- quantized camera would leak unboundedly - each bucket caps allocation at
--- RT_POOL_PER_RES surfaces via same-size LRU recycling. Partitioned because a named
--- surface is size-locked (GetRenderTarget ignores a new size for an existing name),
--- so the mono full-screen pass and the smaller stereoscopy/VR eyes need separate
--- surfaces; bucketing by resolution also stops a mono chain and an eye chain that
--- share a (depth, camera-cell, portal) key from colliding onto one surface - that
--- collision used to drop+reallocate and mint a fresh immortal surface every frame
--- of movement (the stereoscopy leak/crash). 16 covers depth-9 stereo: 8 nested
--- levels for each of the two same-resolution eyes. d=1 RTs stay per-portal-stable
--- (GetPortalTexture) so portal:SetTexture keeps working downstream.
+-- Pool of d>1 exit-view RTs, bucketed by resolution. GetRenderTarget surfaces are
+-- immortal (never freed), so each bucket caps at RT_POOL_PER_RES and LRU-recycles its
+-- own. The resolution split isn't tidiness: a named surface is size-locked, so without
+-- it a mono chain and a smaller stereo/VR eye chain collide on one key and remint a
+-- fresh immortal surface every frame of movement - the stereoscopy leak/crash. 16
+-- covers depth-9 stereo (8 levels x 2 eyes).
 local RT_POOL_PER_RES = 16
 local resPools = {}        -- resTag -> { count, nextSlot, entries = { chainKey -> {rt, lastGen} } }
 local frameCounter = 0
--- Bumped once per top-level view (mono eye, or each stereoscopy/VR eye). A bucket's
--- LRU eviction only recycles a surface from a PRIOR view (lastGen < viewGen) so an
--- in-flight RT from the current view's recursion is never stolen. Frame-scoping
--- pinned every eye's RTs for the whole frame, so the later eyes starved to no recursion.
+-- Bumped per top-level view (mono eye, or each stereo/VR eye). LRU eviction recycles
+-- only a prior view's surface (lastGen < viewGen), so the current view's in-flight
+-- RTs aren't stolen.
 local viewGen = 0
 
 hook.Add("PreRender", "WorldPortals_AdvanceFrame", function()
@@ -488,26 +481,21 @@ function WorldPortals_RenderView(view)
     local aspect = v.aspectratio or (width / height)
     local fov = v.fov
     if not fov then
-        -- A view struct with no fov renders at the engine's aspect-corrected (Hor+)
-        -- horizontal fov, not the raw GetFOV() 4:3-reference value. The RT must project
-        -- identically to the eye scene, so match it; falling back to GetFOV() zooms the
-        -- view in when portals open (a stereoscopy/VR eye passes no fov of its own here).
+        -- A view with no fov (a stereo/VR eye) must match the engine's actual rendered fov:
+        -- the aspect-corrected Hor+ value, not raw GetFOV() (the 4:3 reference), or the
+        -- through-portal view zooms relative to the eye scene.
         fov = math.deg(2 * math.atan(math.tan(math.rad(LocalPlayer():GetFOV() * 0.5)) * aspect / (4 / 3)))
     end
 
-    -- True only when this render.RenderView is a portal rendering its own exit RT
-    -- (nested - renderportals sets wp.drawing before recursing). A top-level eye
-    -- has wp.drawing false, including each stereoscopy/VR eye, which also routes
-    -- through render.RenderView; those must use the stencil portal view, not the
-    -- flat matView2 face path the entity Draw takes under rendermode.
+    -- wp.drawing is true only inside a portal rendering its own exit RT (renderportals
+    -- sets it before recursing); a top-level eye - each stereo/VR eye included, as those
+    -- also route through render.RenderView - has it false and needs the stencil path.
     local nested = wp.drawing
 
     if not nested then
-        -- Each top-level view needs its own portal RTs, and every stereoscopy/VR
-        -- eye is a separate render.RenderView within one frame. frameRenderedChains
-        -- dedups renders within a single view's recursion, but its d=1 key omits
-        -- the camera - so without clearing it here a second eye would skip its own
-        -- portal render and reuse (or, on a size mismatch, blank) the first eye's RT.
+        -- Each top-level view (each stereo/VR eye is its own render.RenderView) needs its
+        -- own RTs. frameRenderedChains dedups within one view's recursion, but its d=1 key
+        -- omits the camera - so without clearing, a later eye reuses the first eye's RTs.
         for k in pairs(frameRenderedChains) do frameRenderedChains[k] = nil end
         wp.renderportals(origin, angles, width, height, fov, 1, nil, nil, nil, nil, aspect)
     end
@@ -531,15 +519,15 @@ function WorldPortals_RenderView(view)
     wp.viewfov = fov
     wp.viewwidth = width
     wp.viewheight = height
-    -- This eye's pixel rect, for the portal RT blit (cl_init.lua draws the RT over it).
-    -- A VR eye is a sub-viewport of the pushed g_VR.rt; a stereoscopy eye a sub-viewport
-    -- of the back buffer; the mono eye the whole screen (the RenderScene hook sets that).
+    -- This eye's pixel rect on the active render target, where cl_init.lua paints the
+    -- portal RT: a sub-rect of vrmod's shared two-eye buffer in VR, of the back buffer
+    -- in stereoscopy, or the whole screen in mono.
     wp.viewportX = v.x or 0
     wp.viewportY = v.y or 0
     wp.viewportW = width
     wp.viewportH = height
-    -- The full render target the eye is a sub-viewport of (here ScrW/ScrH is the whole
-    -- g_VR.rt; RealRenderView narrows it to the eye). The blit's UV remap needs it.
+    -- Size of that full target: ScrW/ScrH here is the whole pushed buffer (both eyes in
+    -- VR), which the per-eye texture-coord remap needs.
     wp.viewportRTW = ScrW()
     wp.viewportRTH = ScrH()
     render.RealRenderView(view)
@@ -841,9 +829,9 @@ hook.Add("PreRender", "WorldPortals_ResetRenderCount", function()
 end)
 
 -- The scene render leaves specular/HDR data in the RT's alpha channel; the translucent
--- blit (cl_init.lua) would read that as opacity and show the nearest surfaces as fake
--- translucency. Flatten alpha to 255 (RGB untouched) so the blit's opacity is clean -
--- solid where the draw is opaque, the portal's transparency where it isn't.
+-- exit-view draw (cl_init.lua) would read that as opacity and show the nearest surfaces as
+-- fake translucency. Flatten alpha to 255 (RGB untouched) so the draw's opacity is clean -
+-- solid where opaque, the portal's transparency where not.
 local function flattenRTAlpha(width, height)
     render.OverrideColorWriteEnable(true, false)
     render.OverrideAlphaWriteEnable(true, true)
@@ -1114,13 +1102,11 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
-    -- vrmod renders both eyes in its own RenderScene hook and blits one to the
-    -- desktop, overriding the default scene - so this full-screen pass would just
-    -- fill portal RTs nothing displays (a wasted full recursion at desktop res,
-    -- the priciest pass). The eyes render via render.RenderView, untouched. Skip it.
+    -- In VR, vrmod renders the eyes itself and shows one on the desktop, so this normal
+    -- full-screen pass just fills RTs nothing displays - skip the wasted work.
     if vrmod and vrmod.IsPlayerInVR() then return end
-    -- The mono eye fills the whole framebuffer (each stereoscopy/VR eye restamps
-    -- these from its own sub-viewport in WorldPortals_RenderView).
+    -- Mono fills the whole screen; each stereo/VR eye overrides these per-eye in
+    -- WorldPortals_RenderView.
     wp.viewportX, wp.viewportY = 0, 0
     wp.viewportW, wp.viewportH = ScrW(), ScrH()
     wp.viewportRTW, wp.viewportRTH = ScrW(), ScrH()
