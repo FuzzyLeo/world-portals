@@ -156,6 +156,12 @@ local rtPoolCount = 0
 local rtPoolNextSlot = 0
 local rtPoolMaxSize = 32
 local frameCounter = 0
+-- Bumped once per top-level view (mono eye, or each stereoscopy/VR eye). The pool's
+-- in-flight protection keys off this, not the frame: a pooled RT is consumed the
+-- moment its view's recursion returns, so the next view rendering the SAME frame
+-- (the other eye) must be free to reuse it. Frame-scoping kept every eye's RTs pinned
+-- for the whole frame, so the second/third eye starved and dropped to no recursion.
+local viewGen = 0
 
 hook.Add("PreRender", "WorldPortals_AdvanceFrame", function()
     frameCounter = frameCounter + 1
@@ -279,7 +285,7 @@ wp.TransformPortalAngleInto = transformPortalAngleInto
 local function getPooledRT(chainKey, width, height)
     local entry = rtPool[chainKey]
     if entry and entry.width == width and entry.height == height then
-        entry.lastFrame = frameCounter
+        entry.lastGen = viewGen
         return entry.rt
     end
     -- Resolution changed; drop and reallocate.
@@ -291,17 +297,21 @@ local function getPooledRT(chainKey, width, height)
     if rtPoolCount < rtPoolMaxSize then
         local rt = GetRenderTarget("wp_chain_pool_" .. rtPoolNextSlot, width, height)
         rtPoolNextSlot = rtPoolNextSlot + 1
-        rtPool[chainKey] = { rt = rt, lastFrame = frameCounter, width = width, height = height }
+        rtPool[chainKey] = { rt = rt, lastGen = viewGen, width = width, height = height }
         rtPoolCount = rtPoolCount + 1
         return rt
     end
 
-    -- Evict LRU, but never a current-frame entry (still in flight). If
-    -- everything's current we're over capacity - skip the render.
-    local lruKey, lruFrame
+    -- At capacity: recycle the least-recently-used entry from a PRIOR view (a
+    -- current-view entry is still in flight this pass). GetRenderTarget can't resize,
+    -- so only a same-resolution victim yields a usable surface - restrict to this size
+    -- so the mono full-screen pass and each stereoscopy/VR eye sub-viewport keep their
+    -- own surfaces instead of evicting across sizes and stalling on the mismatch.
+    local lruKey, lruGen
     for k, e in pairs(rtPool) do
-        if e.lastFrame < frameCounter and (not lruKey or e.lastFrame < lruFrame) then
-            lruKey, lruFrame = k, e.lastFrame
+        if e.lastGen < viewGen and e.width == width and e.height == height
+            and (not lruKey or e.lastGen < lruGen) then
+            lruKey, lruGen = k, e.lastGen
         end
     end
     if not lruKey then return nil end
@@ -309,12 +319,7 @@ local function getPooledRT(chainKey, width, height)
     local victim = rtPool[lruKey]
     if not victim then return nil end
     rtPool[lruKey] = nil
-    if victim.width ~= width or victim.height ~= height then
-        -- Wrong size; reallocating would defeat pooling. Skip instead.
-        rtPoolCount = rtPoolCount - 1
-        return nil
-    end
-    rtPool[chainKey] = { rt = victim.rt, lastFrame = frameCounter, width = width, height = height }
+    rtPool[chainKey] = { rt = victim.rt, lastGen = viewGen, width = width, height = height }
     return victim.rt
 end
 
@@ -636,7 +641,13 @@ local lastCamFwdX, lastCamFwdY, lastCamFwdZ = 0, 0, 0
 local lastCamRtX, lastCamRtY, lastCamRtZ = 0, 0, 0
 local lastCamUpX, lastCamUpY, lastCamUpZ = 0, 0, 0
 
-function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
+-- sw/sh are the projection space the polygon is measured in. They MUST be stable
+-- across one recursion (the cull intersects a parent and child poly), so renderportals
+-- passes its view width/height - NOT ScrW()/ScrH(), which silently changes the moment a
+-- portal render target is pushed (a stereoscopy/VR eye RT is smaller than the screen, so
+-- ancestor polys built pre-push and child polys built post-push would be in different
+-- spaces and never intersect). Defaults to the screen for the debug overlay.
+function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect, sw, sh)
     local cap, cay, car = camAng.p, camAng.y, camAng.r
     if cap ~= lastCamP or cay ~= lastCamY or car ~= lastCamR then
         local f = camAng:Forward()
@@ -653,7 +664,8 @@ function wp.GetPortalScreenPolygon(portal, camPos, camAng, camFov, aspect)
     local tanHalfH = math.tan(camFov * math.pi / 360)
     local tanHalfV = tanHalfH / aspect
 
-    local sw, sh = ScrW(), ScrH()
+    sw = sw or ScrW()
+    sh = sh or ScrH()
     local out = acquirePoly()
 
     cachePortalScalars(portal)
@@ -860,6 +872,10 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
     if not enabled then return end
 
     depth = ClampRecurseDepth(depth)
+    -- A new top-level view starts here (the mono eye, or each stereoscopy/VR eye).
+    -- Advance the pool generation so this view can reclaim the previous view's
+    -- already-consumed RTs instead of starving behind them (see viewGen).
+    if depth <= 1 then viewGen = viewGen + 1 end
     if depth > recurseDepth then return end
 
     local oldRenderDepth = wp.renderdepth
@@ -923,7 +939,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             if not clipped then
                 if depth == 1 then
                     -- No ancestor; compute poly once for children to clip against.
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
+                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
                     if #poly < 6 then
                         releasePoly(poly); poly = nil
                     else
@@ -931,7 +947,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                         shouldRender = true
                     end
                 else
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect)
+                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
                     if #poly < 6 then
                         releasePoly(poly); poly = nil
                     elseif parentPoly then
@@ -1122,9 +1138,8 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
 end
 
 hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, fov )
-    -- The main eye fills the whole framebuffer. Stereoscopy/VR override this hook
-    -- and re-render each eye through render.RenderView with its own sub-viewport,
-    -- which restamps these; this is just the default for the un-overridden mono eye.
+    -- The mono eye fills the whole framebuffer (each stereoscopy/VR eye restamps
+    -- these from its own sub-viewport in WorldPortals_RenderView).
     wp.viewportX, wp.viewportY = 0, 0
     wp.viewportW, wp.viewportH = ScrW(), ScrH()
     wp.viewportRTW, wp.viewportRTH = ScrW(), ScrH()
