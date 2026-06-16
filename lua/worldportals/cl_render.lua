@@ -147,20 +147,25 @@ local function getDecisionKey(depth, camPos, portal)
     return key
 end
 
--- Bounded LRU pool of RTs for d>1 renders. GetRenderTarget allocates a GPU
--- surface per unique name and the engine never frees them, so per-portal
--- caching across many quantized cameras would leak unboundedly. d=1 RTs
--- stay per-portal-stable so portal:SetTexture keeps working downstream.
-local rtPool = {}
-local rtPoolCount = 0
-local rtPoolNextSlot = 0
-local rtPoolMaxSize = 32
+-- Pool of d>1 RTs, partitioned by render resolution. GetRenderTarget allocates a
+-- GPU surface per unique name and the engine never frees them, so caching per
+-- quantized camera would leak unboundedly - each bucket caps allocation at
+-- RT_POOL_PER_RES surfaces via same-size LRU recycling. Partitioned because a named
+-- surface is size-locked (GetRenderTarget ignores a new size for an existing name),
+-- so the mono full-screen pass and the smaller stereoscopy/VR eyes need separate
+-- surfaces; bucketing by resolution also stops a mono chain and an eye chain that
+-- share a (depth, camera-cell, portal) key from colliding onto one surface - that
+-- collision used to drop+reallocate and mint a fresh immortal surface every frame
+-- of movement (the stereoscopy leak/crash). 16 covers depth-9 stereo: 8 nested
+-- levels for each of the two same-resolution eyes. d=1 RTs stay per-portal-stable
+-- (GetPortalTexture) so portal:SetTexture keeps working downstream.
+local RT_POOL_PER_RES = 16
+local resPools = {}        -- resTag -> { count, nextSlot, entries = { chainKey -> {rt, lastGen} } }
 local frameCounter = 0
--- Bumped once per top-level view (mono eye, or each stereoscopy/VR eye). The pool's
--- in-flight protection keys off this, not the frame: a pooled RT is consumed the
--- moment its view's recursion returns, so the next view rendering the SAME frame
--- (the other eye) must be free to reuse it. Frame-scoping kept every eye's RTs pinned
--- for the whole frame, so the second/third eye starved and dropped to no recursion.
+-- Bumped once per top-level view (mono eye, or each stereoscopy/VR eye). A bucket's
+-- LRU eviction only recycles a surface from a PRIOR view (lastGen < viewGen) so an
+-- in-flight RT from the current view's recursion is never stolen. Frame-scoping
+-- pinned every eye's RTs for the whole frame, so the later eyes starved to no recursion.
 local viewGen = 0
 
 hook.Add("PreRender", "WorldPortals_AdvanceFrame", function()
@@ -283,48 +288,52 @@ end
 wp.TransformPortalAngleInto = transformPortalAngleInto
 
 local function getPooledRT(chainKey, width, height)
-    local entry = rtPool[chainKey]
-    if entry and entry.width == width and entry.height == height then
+    local tag = math.floor(width) .. "x" .. math.floor(height)
+    local bucket = resPools[tag]
+    if not bucket then
+        bucket = { count = 0, nextSlot = 0, entries = {} }
+        resPools[tag] = bucket
+    end
+
+    local entry = bucket.entries[chainKey]
+    if entry then
         entry.lastGen = viewGen
         return entry.rt
     end
-    -- Resolution changed; drop and reallocate.
-    if entry then
-        rtPool[chainKey] = nil
-        rtPoolCount = rtPoolCount - 1
-    end
 
-    if rtPoolCount < rtPoolMaxSize then
-        local rt = GetRenderTarget("wp_chain_pool_" .. rtPoolNextSlot, width, height)
-        rtPoolNextSlot = rtPoolNextSlot + 1
-        rtPool[chainKey] = { rt = rt, lastGen = viewGen, width = width, height = height }
-        rtPoolCount = rtPoolCount + 1
+    if bucket.count < RT_POOL_PER_RES then
+        local rt = GetRenderTarget("wp_chain_pool_" .. tag .. "_" .. bucket.nextSlot, width, height)
+        bucket.nextSlot = bucket.nextSlot + 1
+        bucket.entries[chainKey] = { rt = rt, lastGen = viewGen }
+        bucket.count = bucket.count + 1
         return rt
     end
 
-    -- At capacity: recycle the least-recently-used entry from a PRIOR view (a
-    -- current-view entry is still in flight this pass). GetRenderTarget can't resize,
-    -- so only a same-resolution victim yields a usable surface - restrict to this size
-    -- so the mono full-screen pass and each stereoscopy/VR eye sub-viewport keep their
-    -- own surfaces instead of evicting across sizes and stalling on the mismatch.
+    -- At capacity: recycle the least-recently-used surface from a PRIOR view (a
+    -- current-view entry is still in flight this pass). Same bucket = same size, so
+    -- the recycled surface is always usable.
     local lruKey, lruGen
-    for k, e in pairs(rtPool) do
-        if e.lastGen < viewGen and e.width == width and e.height == height
-            and (not lruKey or e.lastGen < lruGen) then
+    for k, e in pairs(bucket.entries) do
+        if e.lastGen < viewGen and (not lruKey or e.lastGen < lruGen) then
             lruKey, lruGen = k, e.lastGen
         end
     end
     if not lruKey then return nil end
 
-    local victim = rtPool[lruKey]
+    local victim = bucket.entries[lruKey]
     if not victim then return nil end
-    rtPool[lruKey] = nil
-    rtPool[chainKey] = { rt = victim.rt, lastGen = viewGen, width = width, height = height }
+    bucket.entries[lruKey] = nil
+    bucket.entries[chainKey] = { rt = victim.rt, lastGen = viewGen }
     return victim.rt
 end
 
 function wp.GetPortalPoolStats()
-    return rtPoolCount, rtPoolMaxSize
+    local count, buckets = 0, 0
+    for _, b in pairs(resPools) do
+        count = count + b.count
+        buckets = buckets + 1
+    end
+    return count, RT_POOL_PER_RES * math.max(buckets, 1)
 end
 
 ---@return ITexture?
