@@ -8,7 +8,7 @@ wp.matView2 = CreateMaterial("WorldPortals", "Core_DX90", {["$basetexture"] = wp
 -- Blit material for the exit-view RT. render.DrawScreenQuad (cl_init.lua) fills the active
 -- eye sub-viewport exactly but its UV spans the whole render target, so a stereoscopy/VR eye
 -- reads only its half; the blit remaps the eye's UV slice back to [0..1] via this material's
--- $basetexturetransform (wp.blitMatrix). $translucent carries portal transparency via SetBlend.
+-- $basetexturetransform (wp.blitMatrix). $translucent lets the per-draw $alpha (cl_init.lua) carry portal transparency.
 wp.matViewUV = CreateMaterial("WorldPortals_ViewUV", "UnlitGeneric", {
     ["$basetexture"] = wp.matBlack:GetName(),
     ["$ignorez"] = "1",
@@ -199,7 +199,6 @@ local function cachePortalScalars(p)
     p.WPEAOffP, p.WPEAOffY, p.WPEAOffR = eao.p, eao.y, eao.r
     p.WPCacheFrame = frameCounter
 end
-wp.CachePortalScalars = cachePortalScalars
 
 -- Static scratch buffers - mutated per call but never retained by engine.
 local EXIT_ANG_BUF = Angle()
@@ -327,18 +326,7 @@ local function getPooledRT(chainKey, width, height)
     return victim.rt
 end
 
-function wp.GetPortalPoolStats()
-    local count, buckets = 0, 0
-    for _, b in pairs(resPools) do
-        count = count + b.count
-        buckets = buckets + 1
-    end
-    return count, RT_POOL_PER_RES * math.max(buckets, 1)
-end
-
 ---@return ITexture?
----@return number width
----@return number height
 function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     depth = ClampRecurseDepth(depth)
     width = width or ScrW()
@@ -349,23 +337,20 @@ function wp.GetPortalTexture(portal, width, height, depth, chainKey)
     if depth <= 1 then
         local texture = portal.WPTexture1
         if texture and portal.WPTexture1Width == width and portal.WPTexture1Height == height then
-            return texture, width, height
+            return texture
         end
         texture = GetRenderTarget("portal:" .. portal:EntIndex() .. ":d1:" .. width .. ":" .. height, width, height)
         portal.WPTexture1 = texture
         portal.WPTexture1Width = width
         portal.WPTexture1Height = height
-        if texture then return texture, width, height end
-        return texture, width, height
+        return texture
     end
 
     chainKey = chainKey or (depth .. ":" .. portal:EntIndex())
-    return getPooledRT(chainKey, width, height), width, height
+    return getPooledRT(chainKey, width, height)
 end
 
 ---@return ITexture
----@return number width
----@return number height
 ---@return number depth
 function wp.GetPortalDrawTexture(portal)
     local depth = wp.drawtexturedepth or 1
@@ -373,14 +358,12 @@ function wp.GetPortalDrawTexture(portal)
     local chainKey = portal.WPLastDrawChainDepth == depth and portal.WPLastDrawChainCam == camPos and portal.WPLastDrawChainKey or getChainKey(depth, camPos, portal)
     if portal.WPLastRenderedChainKey == chainKey
         and portal.WPLastRenderedDepth == depth
-        and portal.WPLastRenderedWidth
-        and portal.WPLastRenderedHeight
         and portal.WPLastRenderedTexture
     then
-        return portal.WPLastRenderedTexture, portal.WPLastRenderedWidth, portal.WPLastRenderedHeight, depth
+        return portal.WPLastRenderedTexture, depth
     end
-    local texture, width, height = wp.GetPortalTexture(portal, wp.viewwidth or ScrW(), wp.viewheight or ScrH(), depth, chainKey)
-    return texture, width, height, depth
+    local texture = wp.GetPortalTexture(portal, wp.viewwidth or ScrW(), wp.viewheight or ScrH(), depth, chainKey)
+    return texture, depth
 end
 
 -- Chain keys whose RT was filled this frame. renderportals uses it to dedup
@@ -722,10 +705,6 @@ local function polygonSignedArea(poly)
     return sum * 0.5
 end
 
-function wp.PolygonArea(poly)
-    return math.abs(polygonSignedArea(poly))
-end
-
 local function reversePolygonInto(src, dst)
     for i = #dst, 1, -1 do dst[i] = nil end
     for i = #src - 1, 1, -2 do
@@ -946,45 +925,35 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             end
 
             if not clipped then
-                if depth == 1 then
-                    -- No ancestor; compute poly once for children to clip against.
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
-                    if #poly < 6 then
+                poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
+                if #poly < 6 then
+                    releasePoly(poly); poly = nil
+                elseif parentPoly then
+                    cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
+                    if #cumulativePoly < 6 then
+                        -- Hidden behind ancestor stencil chain.
+                        if recordRenders then
+                            local slot = frameCulledList[frameCulledCount + 1]
+                            if not slot then
+                                slot = {camOrigin = Vector(), camAngle = Angle()}
+                                frameCulledList[frameCulledCount + 1] = slot
+                            end
+                            slot.portal = portal
+                            slot.depth = depth
+                            slot.fov = fov
+                            slot.camOrigin:Set(plyOrigin)
+                            slot.camAngle:Set(plyAngle)
+                            frameCulledCount = frameCulledCount + 1
+                        end
                         releasePoly(poly); poly = nil
+                        releasePoly(cumulativePoly); cumulativePoly = nil
                     else
-                        cumulativePoly = poly
                         shouldRender = true
                     end
                 else
-                    poly = wp.GetPortalScreenPolygon(portal, plyOrigin, plyAngle, fov, aspect, width, height)
-                    if #poly < 6 then
-                        releasePoly(poly); poly = nil
-                    elseif parentPoly then
-                        cumulativePoly = wp.IntersectConvexPolygons(poly, parentPoly)
-                        if #cumulativePoly < 6 then
-                            -- Hidden behind ancestor stencil chain.
-                            if recordRenders then
-                                local slot = frameCulledList[frameCulledCount + 1]
-                                if not slot then
-                                    slot = {camOrigin = Vector(), camAngle = Angle()}
-                                    frameCulledList[frameCulledCount + 1] = slot
-                                end
-                                slot.portal = portal
-                                slot.depth = depth
-                                slot.fov = fov
-                                slot.camOrigin:Set(plyOrigin)
-                                slot.camAngle:Set(plyAngle)
-                                frameCulledCount = frameCulledCount + 1
-                            end
-                            releasePoly(poly); poly = nil
-                            releasePoly(cumulativePoly); cumulativePoly = nil
-                        else
-                            shouldRender = true
-                        end
-                    else
-                        cumulativePoly = poly
-                        shouldRender = true
-                    end
+                    -- No ancestor (depth 1): this poly seeds the children's clip.
+                    cumulativePoly = poly
+                    shouldRender = true
                 end
             end
         end
@@ -1000,8 +969,6 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
             frameRenderedChains[chainKey] = true
             portal.WPLastRenderedChainKey = chainKey
             portal.WPLastRenderedDepth = depth
-            portal.WPLastRenderedWidth = width
-            portal.WPLastRenderedHeight = height
             portal.WPLastRenderedTexture = texture
 
             -- Record for the debug overlay; reuses slots across frames.

@@ -39,7 +39,7 @@ function ENT:Draw()
 
     hook.Call("wp-predraw", GAMEMODE, self, exitPortal)
 
-    local texture, _, _, depth = wp.GetPortalDrawTexture(self)
+    local texture, depth = wp.GetPortalDrawTexture(self)
     if depth == 1 then
         self:SetTexture( texture )
     end
