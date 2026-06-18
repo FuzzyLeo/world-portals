@@ -207,11 +207,13 @@ hook.Add("EntityFireBullets", "WorldPortals_Bullets", function(ent,data)
         endpos = src + dir * distance,
         filter = bulletFilter,
     } --[[@as Trace]])
+    ---@cast trace WPTraceResult
 
     local portal = wp.GetFirstPortalHit(src, dir)
 
     if IsValid(portal.Entity) and portal.Distance < trace.HitPos:Distance(src) then
         local localHitPos = portal.Entity:WorldToLocal(portal.HitPos)
+        ---@type Vector, Vector
         local mins, maxs = portal.Entity:GetCollisionBounds()
         if localHitPos.y > mins.y and localHitPos.y < maxs.y
         and localHitPos.z > mins.z and localHitPos.z < maxs.z
@@ -235,10 +237,12 @@ end
 
 function WorldPortals_TraceLine(data)
     local trace = util.RealTraceLine(data)
+    ---@cast trace WPTraceResult
     local portal = wp.GetFirstPortalHit(trace.StartPos, trace.Normal)
 
     if IsValid(portal.Entity) and portal.Distance < trace.HitPos:Distance(trace.StartPos) then
         local localHitPos = portal.Entity:WorldToLocal(portal.HitPos)
+        ---@type Vector, Vector
         local mins, maxs = portal.Entity:GetCollisionBounds()
 
         if localHitPos.y > mins.y and localHitPos.y < maxs.y

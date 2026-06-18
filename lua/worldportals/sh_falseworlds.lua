@@ -37,6 +37,14 @@ local function ensureCache( id )
     return cache
 end
 
+---@class wp.FalseWorldPart
+---@field model string
+---@field rendergroup integer?
+---@field color Vector?
+---@field pos Vector?
+---@field ang Angle?
+---@field scale Vector?
+
 -- Apply state that's static for the lifetime of the cached entity.
 local function setupPart( rawpart, ent )
     ent:SetNoDraw( true )
@@ -142,6 +150,7 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
                     end
                 end
                 if IsValid( part ) then
+                    ---@cast rawpart wp.FalseWorldPart
                     local color = rawpart.color
                     if color then
                         render.SetColorModulation( color.x, color.y, color.z )

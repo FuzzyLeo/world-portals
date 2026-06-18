@@ -20,6 +20,7 @@ local OPENING_SLACK = 8     -- units of slack on the portal opening (width/heigh
 -- so clip the halves there, not at the crossing plane, to seam on the glowing face.
 local FACE_OFFSET   = 5
 
+---@type table<Entity, wp.GhostRecord>
 wp.ghosts = wp.ghosts or {}   -- [entity] = record
 
 -- Lets a consumer that also drives ent's RenderOverride yield to us while we ghost it.
@@ -458,6 +459,37 @@ local function endStraddle(rec)
     wp.ghosts[rec.ent] = nil
 end
 
+---@class wp.GhostRecord
+---@field ent Entity
+---@field portal Entity
+---@field exit Entity
+---@field ghost Entity
+---@field isLocalPlayer boolean
+---@field skeletal boolean
+---@field translucent boolean
+---@field lastSeen number
+---@field posBuf Vector
+---@field angBuf Angle
+---@field entryFrame VMatrix
+---@field exitFrame VMatrix
+---@field entryNrm Vector
+---@field exitNrm Vector
+---@field entryD number
+---@field exitD number
+---@field sig table
+---@field originalOverride function
+---@field hasDrawn boolean?
+---@field savedRenderOverride function?
+---@field shadowReady boolean?
+---@field weapon Entity?
+---@field weaponGhost Entity?
+---@field weaponHasDrawn boolean?
+---@field weaponModel string?
+---@field weaponOriginalOverride function?
+---@field weaponSavedOverride function?
+---@field weaponShadowReady boolean?
+
+---@return wp.GhostRecord?
 local function startStraddle(ent, portal)
     local exit = portal:GetExit()
     if not IsValid(exit) then return nil end
@@ -505,6 +537,7 @@ local function startStraddle(ent, portal)
     return rec
 end
 
+---@param rec wp.GhostRecord
 local function updateStraddle(rec, now)
     rec.lastSeen = now
 

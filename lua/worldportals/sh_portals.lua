@@ -1,5 +1,6 @@
 -- Portals
 
+---@type LinkedPortalDoor[]
 wp.portals = wp.portals or {}
 
 local registered = {}

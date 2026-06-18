@@ -20,3 +20,13 @@
 ---@param value any
 ---@return integer
 function table.insert(tbl, position, value) end
+
+-- glua-api initialises always-populated TraceResult fields to `nil` (e.g.
+-- `TraceResult.HitPos = nil`) despite their `---@type Vector`, and the flow-nil
+-- analysis reads that literal over the annotation - re-declaring the field in a
+-- meta file does not win (class defs merge). A real trace always fills these, so
+-- a populated trace is `---@cast trace WPTraceResult` at the call site instead.
+---@class WPTraceResult : TraceResult
+---@field HitPos Vector
+---@field Normal Vector
+---@field StartPos Vector

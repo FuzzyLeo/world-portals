@@ -8,6 +8,18 @@
 -- cl_viewcorrections.lua / sh_teleport.lua.
 CreateClientConVar("worldportals_debug_predict", "0", true, false, "Show predicted player teleport debug HUD", 0, 1)
 
+---@class wp.PredictTeleportEvent
+---@field time number
+---@field frame number
+---@field portal integer
+---@field oldPos Vector
+---@field newPos Vector
+---@field oldAng Angle
+---@field newAng Angle
+---@field oldVel Vector
+---@field newVel Vector
+
+---@type wp.PredictTeleportEvent[]
 local recentTeleports = {}
 local MAX_HISTORY = 5
 local lastNetTeleport = nil
@@ -108,6 +120,7 @@ hook.Add("HUDPaint", "WorldPortals_DebugPredictHUD", function()
         y = y + lh / 2
         line("---- Predicted teleports (newest first) ----", Color(255, 220, 120))
         for i, e in ipairs(recentTeleports) do
+            ---@cast e wp.PredictTeleportEvent
             local ago = CurTime() - e.time
             line(string.format("[%d] portal=%d  %.3fs ago  frame=%d", i, e.portal, ago, e.frame))
             line(string.format("    pos:  %.1f,%.1f,%.1f -> %.1f,%.1f,%.1f", e.oldPos.x, e.oldPos.y, e.oldPos.z, e.newPos.x, e.newPos.y, e.newPos.z))
