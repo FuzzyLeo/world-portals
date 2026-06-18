@@ -41,19 +41,20 @@ function ENT:BuildFrame(width, height, thickness)
     -- props without changing player movement.
     self:SetCollisionGroup(COLLISION_GROUP_WEAPON)
 
-    if not IsValid(self:GetPhysicsObject()) then return false end
-    -- Drive the hull as an immovable physics SHADOW (both flags false): external
-    -- forces never displace it, yet a swept UpdateShadow each tick pushes props
-    -- along instead of teleporting past them.
-    self:MakePhysicsObjectAShadow(false, false)
     local phys = self:GetPhysicsObject()
     if not IsValid(phys) then return false end
+
+    -- Build a frozen static body, not a shadow yet: a shadow built overlapping the
+    -- parent (the hull sits in its doorway) is force-ejected by the engine's spawn-tick
+    -- stuck-push, which ignores the no-collide and flings the parent. Think promotes it
+    -- to the swept shadow one tick later, past that push.
+    phys:EnableMotion(false)
     phys:SetMass(50000)
     self:SetMoveType(MOVETYPE_NONE)
+    self.PendingShadow = true
 
-    -- The new physobj defaults to colliding - constraint.NoCollide fires its
-    -- disable once and never reapplies - so re-add the frame<->parent no-collide
-    -- or the immovable shadow shoves the parent.
+    -- Re-add the frame<->parent no-collide: a rebuild recreates the physobj and orphans
+    -- the old pair, and the pair fires its disable only once.
     if self.ParentNoCollides then
         for _, c in pairs(self.ParentNoCollides) do
             if IsValid(c) then c:Remove() end
@@ -83,6 +84,17 @@ function ENT:Think()
     -- along with it; snap instead for a single-tick warp (SHADOW_TELEPORT_DIST).
     -- The drift check sweeps while it catches up, leaves it free once converged.
     local phys = self:GetPhysicsObject()
+    if IsValid(phys) then
+        -- Promote the frozen spawn hull to the swept shadow, one tick past the
+        -- spawn-tick stuck-push that flings the parent if it builds as a shadow.
+        if self.PendingShadow then
+            self:MakePhysicsObjectAShadow(false, false)
+            phys = self:GetPhysicsObject()
+            if IsValid(phys) then phys:SetMass(50000) end
+            self.PendingShadow = false
+            self.LastShadowTarget = nil
+        end
+    end
     if IsValid(phys) then
         local last = self.LastShadowTarget
         if (not last) or pos:Distance(last) > SHADOW_TELEPORT_DIST then
