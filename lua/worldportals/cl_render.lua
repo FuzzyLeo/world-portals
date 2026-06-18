@@ -151,9 +151,10 @@ end
 -- immortal (never freed), so each bucket caps at RT_POOL_PER_RES and LRU-recycles its
 -- own. The resolution split isn't tidiness: a named surface is size-locked, so without
 -- it a mono chain and a smaller stereo/VR eye chain collide on one key and remint a
--- fresh immortal surface every frame of movement - the stereoscopy leak/crash. 16
--- covers depth-9 stereo (8 levels x 2 eyes).
-local RT_POOL_PER_RES = 16
+-- fresh immortal surface every frame of movement - the stereoscopy leak/crash. The per
+-- bucket cap trades VRAM for recursion headroom (mono uses one bucket, stereo/VR one
+-- per eye size).
+local RT_POOL_PER_RES = 32
 local resPools = {}        -- resTag -> { count, nextSlot, entries = { chainKey -> {rt, lastGen} } }
 local frameCounter = 0
 -- Bumped per top-level view (mono eye, or each stereo/VR eye). LRU eviction recycles
@@ -215,6 +216,40 @@ local function getDepthSlots(depth)
         depthSlots[depth] = s
     end
     return s
+end
+
+-- The small d>1 RT pool is drained depth-first in iteration order, so in raw array order
+-- portals late in wp.portals starve. Sort the top level by on-screen prominence so the
+-- portal you're looking at claims pool slots first; depth-first then renders its subtree.
+local sortBuffer = {}
+local function sortByPriorityDesc(a, b)
+    return a.WPSortKey > b.WPSortKey
+end
+local function getSortedPortals(portals, camX, camY, camZ, fwdX, fwdY, fwdZ)
+    local buf = sortBuffer -- shared buffer is safe: top-level renders never nest
+    local n = #portals
+    for i = 1, n do
+        local p = portals[i]
+        cachePortalScalars(p)
+        local dx = p.WPPosX - camX
+        local dy = p.WPPosY - camY
+        local dz = p.WPPosZ - camZ
+        local dot = dx * fwdX + dy * fwdY + dz * fwdZ
+        if dot > 0 then
+            -- Rank each portal by how much of the view it commands: larger and closer
+            -- portals, and ones more directly ahead, score higher - so the one you're
+            -- looking at outranks those off to the side or in the distance. The squared
+            -- terms keep it a sqrt-free comparison which is cheaper.
+            local distSqr = dx * dx + dy * dy + dz * dz + 1
+            p.WPSortKey = p:GetWidth() * p:GetHeight() * dot * dot / (distSqr * distSqr)
+        else
+            p.WPSortKey = 0 -- behind the camera
+        end
+        buf[i] = p
+    end
+    for i = n + 1, #buf do buf[i] = nil end
+    table.sort(buf, sortByPriorityDesc)
+    return buf, n
 end
 
 -- Scalarised TransformPortalPos. GMod local frame:
@@ -907,7 +942,16 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
         ply:SetWeaponColor( WEAPON_COLOR_OFF )
     end
 
-    for _, portal in ipairs( portals ) do
+    -- Priority-order only the top level (see getSortedPortals); nested levels keep raw order.
+    local sortedPortals, portalCount
+    if depth == 1 then
+        local pf = plyAngle:Forward()
+        sortedPortals, portalCount = getSortedPortals( portals, plyOrigin.x, plyOrigin.y, plyOrigin.z, pf.x, pf.y, pf.z )
+    else
+        sortedPortals, portalCount = portals, #portals
+    end
+    for idx = 1, portalCount do
+        local portal = sortedPortals[idx]
 
         -- d=1 needs a texture unconditionally for portal:SetTexture; d>1
         -- defers pool allocation until past all culls so doomed chains don't
