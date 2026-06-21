@@ -226,8 +226,10 @@ end
 -- materialize effect reads them).
 local function makeOriginalOverride(rec)
     return function(self, flags)
-        updateEntryPlane(rec)
-        clipToHalf(self, rec.entryNrm, rec.entryD)
+        if IsValid(rec.portal) then
+            updateEntryPlane(rec)
+            clipToHalf(self, rec.entryNrm, rec.entryD)
+        end
         if rec.savedRenderOverride then
             rec.savedRenderOverride(self, flags)
         else
@@ -293,6 +295,7 @@ local function makeGhostOverride(rec)
     return function(self, flags)
         local ent = rec.ent
         if not IsValid(ent) then return end
+        if not (IsValid(rec.portal) and IsValid(rec.exit)) then return end
         -- The local player never sees their own shadow, so keep their ghost shadowless:
         -- the shadow-depth pass calls this override, and skipping it suppresses the cast
         -- (DrawShadow(false) alone can't - it doesn't gate a manual DrawModel). Everyone
@@ -343,6 +346,7 @@ local function makeWeaponGhostOverride(rec)
     return function(self, flags)
         local w = rec.weapon
         if not IsValid(w) then return end
+        if not (IsValid(rec.portal) and IsValid(rec.exit)) then return end
         if rec.isLocalPlayer and bit.band(flags, STUDIO_SHADOWDEPTHTEXTURE) ~= 0 then return end  -- local player's own ghost stays shadowless (see makeGhostOverride)
         if localGhostIsCutaway(rec) then return end
         if ghostDrawVetoed(rec, self) then return end
@@ -363,8 +367,10 @@ end
 
 local function makeWeaponOriginalOverride(rec)
     return function(self, flags)
-        updateEntryPlane(rec)
-        clipToHalf(self, rec.entryNrm, rec.entryD)
+        if IsValid(rec.portal) then
+            updateEntryPlane(rec)
+            clipToHalf(self, rec.entryNrm, rec.entryD)
+        end
         if rec.weaponSavedOverride then
             rec.weaponSavedOverride(self, flags)
         else
