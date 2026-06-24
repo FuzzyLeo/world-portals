@@ -566,7 +566,6 @@ function WorldPortals_RenderView(view)
     local oldViewOrigin = wp.vieworigin
     local oldViewAngle = wp.viewangle
     local oldViewFOV = wp.viewfov
-    local oldViewAspect = wp.viewaspect
     local oldViewWidth = wp.viewwidth
     local oldViewHeight = wp.viewheight
     local oldViewportX = wp.viewportX
@@ -580,7 +579,6 @@ function WorldPortals_RenderView(view)
     wp.vieworigin = origin
     wp.viewangle = angles
     wp.viewfov = fov
-    wp.viewaspect = aspect
     wp.viewwidth = width
     wp.viewheight = height
     -- This eye's pixel rect on the active render target, where cl_init.lua paints the
@@ -599,7 +597,6 @@ function WorldPortals_RenderView(view)
     wp.vieworigin = oldViewOrigin
     wp.viewangle = oldViewAngle
     wp.viewfov = oldViewFOV
-    wp.viewaspect = oldViewAspect
     wp.viewwidth = oldViewWidth
     wp.viewheight = oldViewHeight
     wp.viewportX = oldViewportX
@@ -1195,7 +1192,6 @@ hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, f
     wp.vieworigin = plyOrigin
     wp.viewangle = plyAngle
     wp.viewfov = fov
-    wp.viewaspect = ScrW() / ScrH()
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 
