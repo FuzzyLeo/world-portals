@@ -28,6 +28,7 @@ function table.insert(tbl, position, value) end
 -- a populated trace is `---@cast trace WPTraceResult` at the call site instead.
 ---@class WPTraceResult : TraceResult
 ---@field HitPos Vector
+---@field HitNormal Vector
 ---@field Normal Vector
 ---@field StartPos Vector
 
