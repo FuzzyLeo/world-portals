@@ -32,8 +32,48 @@ function ENT:SetupBounds(w, h, t)
     self:SetCollisionBounds( self.RenderMin, self.RenderMax )
 
     if CLIENT then
-        self:SetRenderBounds( self.RenderMin, self.RenderMax )
+        self:UpdateRenderBounds()
     end
+end
+
+-- Render bounds = the portal box unioned with the assigned model's bounds, so a custom model bigger
+-- than its opening doesn't get frustum-culled when the opening is off-screen but the model is still
+-- on-screen. Collision bounds stay the opening (set above).
+function ENT:UpdateRenderBounds()
+    if not (self.RenderMin and self.RenderMax) then return end
+    local mins, maxs = Vector(self.RenderMin), Vector(self.RenderMax)
+    if self:GetCustomModel() ~= "" then
+        ---@type Vector, Vector
+        local lmn, lmx = self:GetModelRenderBounds()
+        if lmn and lmx then
+            local off, ang = self:GetCustomModelPosOffset(), self:GetCustomModelAngOffset()
+            local corners = {
+                Vector(lmn.x, lmn.y, lmn.z), Vector(lmx.x, lmn.y, lmn.z),
+                Vector(lmn.x, lmx.y, lmn.z), Vector(lmx.x, lmx.y, lmn.z),
+                Vector(lmn.x, lmn.y, lmx.z), Vector(lmx.x, lmn.y, lmx.z),
+                Vector(lmn.x, lmx.y, lmx.z), Vector(lmx.x, lmx.y, lmx.z),
+            }
+            for _, corner in ipairs(corners) do
+                local c = LocalToWorld(corner, angle_zero, off, ang)
+                mins.x = math.min(mins.x, c.x); mins.y = math.min(mins.y, c.y); mins.z = math.min(mins.z, c.z)
+                maxs.x = math.max(maxs.x, c.x); maxs.y = math.max(maxs.y, c.y); maxs.z = math.max(maxs.z, c.z)
+            end
+        end
+    end
+    self:SetRenderBounds(mins, maxs)
+end
+
+-- NetworkVarNotify fires before the value is applied, so defer the render-bounds recompute one frame
+-- to read the settled value; coalesces multiple same-tick changes into one update.
+function ENT:QueueRenderBoundsUpdate()
+    if not CLIENT or self.WPBoundsQueued then return end
+    self.WPBoundsQueued = true
+    timer.Simple(0, function()
+        if IsValid(self) then
+            self.WPBoundsQueued = nil
+            self:UpdateRenderBounds()
+        end
+    end)
 end
 
 function ENT:Initialize()
@@ -85,8 +125,9 @@ function ENT:SetupDataTables()
     self:NetworkVar( "Vector", "ExitPosOffset" )
     self:NetworkVar( "Angle", "ExitAngOffset" )
 
-    self:NetworkVar( "Vector", "ModelPos" )
-    self:NetworkVar( "Angle", "ModelAng" )
+    self:NetworkVar( "Vector", "CustomModelPosOffset" )
+    self:NetworkVar( "Angle", "CustomModelAngOffset" )
+    self:NetworkVar( "String", "CustomModel" )
 
     -- Rebuild the server-only collision frame on resize. Pass the new value
     -- explicitly (the accessor may still read stale here) and only touch an
@@ -117,5 +158,19 @@ function ENT:SetupDataTables()
     end)
     self:NetworkVarNotify("EnableTeleport", function(ent, name, old, new)
         if SERVER and not new then wp.DisarmPortal(ent) end
+    end)
+
+    -- Apply the model (and so network it) when the CustomModel netvar is set, and re-extend the render
+    -- bounds when the model or its offset/angle change. The recompute is deferred a frame (see
+    -- QueueRenderBoundsUpdate) because the notify fires before the new value is applied.
+    self:NetworkVarNotify("CustomModel", function(ent, _, _, new)
+        if new ~= "" then ent:SetModel(new) end
+        ent:QueueRenderBoundsUpdate()
+    end)
+    self:NetworkVarNotify("CustomModelPosOffset", function(ent)
+        ent:QueueRenderBoundsUpdate()
+    end)
+    self:NetworkVarNotify("CustomModelAngOffset", function(ent)
+        ent:QueueRenderBoundsUpdate()
     end)
 end
