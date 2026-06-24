@@ -38,6 +38,23 @@ function ENT:KeyValue( key, value )
     elseif ( key == "falseworld" ) then
         self:SetFalseWorld( value )
 
+    elseif ( key == "custommodel" ) then
+        self:SetCustomModel( value )
+
+    elseif ( key == "custommodelpos" ) then
+        local args = value:Split( " " )
+        for k, arg in pairs( args ) do
+            args[k] = tonumber(arg)
+        end
+        self:SetCustomModelPosOffset( Vector( unpack(args) ) )
+
+    elseif ( key == "custommodelang" ) then
+        local args = value:Split( " " )
+        for k, arg in pairs( args ) do
+            args[k] = tonumber(arg)
+        end
+        self:SetCustomModelAngOffset( Angle( unpack(args) ) )
+
     elseif ( key == "EnableTeleport" ) then
         self:SetEnableTeleport( tobool(value) )
         self.EnableTeleportSetByMap = true
