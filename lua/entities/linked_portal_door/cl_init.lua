@@ -3,6 +3,14 @@ include( "shared.lua" )
 
 AccessorFunc( ENT, "texture", "Texture" )
 
+-- True when the active render origin is submerged (eyes underwater). Tests the actual view origin
+-- rather than the player's WaterLevel, so it's correct for a VR eye (the HMD can be underwater while
+-- the player entity isn't) and for camera/monitor views above water.
+local function eyeInWater()
+    local vo = wp.vieworigin
+    return vo and bit.band( util.PointContents( vo ), CONTENTS_WATER ) ~= 0 or false
+end
+
 function ENT:DrawPortal(exitPortal)
     if not (self:GetModel() == "models/error.mdl") then
         render.ModelMaterialOverride( wp.matInvis )
@@ -94,37 +102,56 @@ function ENT:Draw()
             -- Now fill the stencilled opening (where stencil == 1) with the exit view.
             render.SetStencilCompareFunction( STENCIL_EQUAL )
 
-            -- In stereo/VR this eye only draws into part of the screen, so DrawScreenQuad
-            -- would sample only the matching part of the exit-view texture (half a view,
-            -- shifted). This transform rescales the texture lookup so the eye samples the
-            -- whole view. In mono the eye is the whole screen, so it changes nothing.
-            local vx, vy = wp.viewportX or 0, wp.viewportY or 0
-            local vw, vh = wp.viewportW or ScrW(), wp.viewportH or ScrH()
-            local rtw, rth = wp.viewportRTW or vw, wp.viewportRTH or vh
-            local m = wp.uvRemapMatrix
-            m:Identity()
-            m:SetField( 1, 1, rtw / vw )   -- rescale horizontally (1.0 in mono)
-            m:SetField( 2, 2, rth / vh )   -- rescale vertically
-            m:SetField( 1, 4, -vx / vw )   -- shift onto this eye's left edge (0 in mono)
-            m:SetField( 2, 4, -vy / vh )   -- shift onto this eye's top edge
-            wp.matViewUV:SetMatrix( "$basetexturetransform", m )
-            wp.matViewUV:SetTexture( "$basetexture", texture )
-            render.SetMaterial( wp.matViewUV )
-            render.SetColorModulation( 1, 1, 1 )
+            -- Source renders water in extra passes that clip geometry at the surface, which breaks
+            -- the default screen-space fill below the water line. Branch on the bound render target
+            -- so each pass (and the eyes-underwater main view) gets a fill that survives the clip.
+            local rt = render.GetRenderTarget()
+            local rtName = rt and rt:GetName() or ""
 
-            -- Transparency goes through $alpha, not render.SetBlend: $vertexalpha makes
-            -- DrawScreenQuad's own (opaque) vertex alpha override SetBlend, so it never took.
-            wp.matViewUV:SetFloat( "$alpha", transparency > 0 and ( transparency / 255 ) or 1 )
+            if rtName == "_rt_waterreflection" then
+                -- Reflection uses a mirrored camera, so the eye-rendered exit view can't be fitted
+                -- here. Skip it; the stamped black face reflects like a door.
+            else
+                -- Below the water line Source clips geometry at the surface (the refraction pass, and
+                -- the main view once the eyes submerge), which would discard the screen-space fill (a
+                -- quad up at the camera, above water). Lift that clip so the one screen-space fill
+                -- works there too, instead of a separate tessellated-geometry path.
+                local belowWater = rtName == "_rt_waterrefraction" or eyeInWater()
+                local prevClip
+                if belowWater then prevClip = render.EnableClipping( false ) end
 
-            -- DrawScreenQuad fills the whole buffer wherever the stencil passes. In stereo/VR
-            -- the eyes share that buffer and stencil, so clip to this eye or the second eye
-            -- bleeds into the first's opening (full-screen, so a no-op, in mono).
-            render.SetScissorRect( vx, vy, vx + vw, vy + vh, true )
-            -- 3D context: cam.Start2D would skew the fill, so the interior slides as you
-            -- look across the portal at an angle.
-            render.DrawScreenQuad()
-            render.SetScissorRect( 0, 0, 0, 0, false )
-            wp.matViewUV:SetFloat( "$alpha", 1 )
+                -- In stereo/VR this eye only draws into part of the screen, so DrawScreenQuad
+                -- would sample only the matching part of the exit-view texture (half a view,
+                -- shifted). This transform rescales the texture lookup so the eye samples the
+                -- whole view. In mono the eye is the whole screen, so it changes nothing.
+                local vx, vy = wp.viewportX or 0, wp.viewportY or 0
+                local vw, vh = wp.viewportW or ScrW(), wp.viewportH or ScrH()
+                local rtw, rth = wp.viewportRTW or vw, wp.viewportRTH or vh
+                local m = wp.uvRemapMatrix
+                m:Identity()
+                m:SetField( 1, 1, rtw / vw )   -- rescale horizontally (1.0 in mono)
+                m:SetField( 2, 2, rth / vh )   -- rescale vertically
+                m:SetField( 1, 4, -vx / vw )   -- shift onto this eye's left edge (0 in mono)
+                m:SetField( 2, 4, -vy / vh )   -- shift onto this eye's top edge
+                wp.matViewUV:SetMatrix( "$basetexturetransform", m )
+                wp.matViewUV:SetTexture( "$basetexture", texture )
+                render.SetMaterial( wp.matViewUV )
+                render.SetColorModulation( 1, 1, 1 )
+                -- Transparency goes through $alpha, not render.SetBlend: $vertexalpha makes
+                -- DrawScreenQuad's own (opaque) vertex alpha override SetBlend, so it never took.
+                wp.matViewUV:SetFloat( "$alpha", transparency > 0 and ( transparency / 255 ) or 1 )
+                -- DrawScreenQuad fills the whole buffer wherever the stencil passes. In stereo/VR
+                -- the eyes share that buffer and stencil, so clip to this eye or the second eye
+                -- bleeds into the first's opening (full-screen, so a no-op, in mono).
+                render.SetScissorRect( vx, vy, vx + vw, vy + vh, true )
+                -- 3D context: cam.Start2D would skew the fill, so the interior slides as you
+                -- look across the portal at an angle.
+                render.DrawScreenQuad()
+                render.SetScissorRect( 0, 0, 0, 0, false )
+                wp.matViewUV:SetFloat( "$alpha", 1 )
+
+                if belowWater then render.EnableClipping( prevClip ) end
+            end
 
             render.SetStencilEnable( false )
         end
