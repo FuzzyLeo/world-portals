@@ -1186,6 +1186,12 @@ hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, f
     wp.viewportX, wp.viewportY = 0, 0
     wp.viewportW, wp.viewportH = ScrW(), ScrH()
     wp.viewportRTW, wp.viewportRTH = ScrW(), ScrH()
+    -- The mono main view is rendered natively by the engine, not through WorldPortals_RenderView,
+    -- so these are otherwise unset for mono. Match what renderportals renders the RT with, so
+    -- cl_init.lua's opening fill projects through the same camera.
+    wp.vieworigin = plyOrigin
+    wp.viewangle = plyAngle
+    wp.viewfov = fov
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
 end )
 
