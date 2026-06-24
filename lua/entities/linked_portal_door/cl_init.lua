@@ -12,9 +12,10 @@ local function eyeInWater()
 end
 
 function ENT:DrawPortal(exitPortal)
-    if not (self:GetModel() == "models/error.mdl") then
+    local customModel = self:GetCustomModel()
+    if customModel ~= "" then
         render.ModelMaterialOverride( wp.matInvis )
-        render.Model({model = self:GetModel(), pos = self:LocalToWorld(self:GetModelPos()), angle = self:LocalToWorldAngles(self:GetModelAng())})
+        render.Model({model = customModel, pos = self:LocalToWorld(self:GetCustomModelPosOffset()), angle = self:LocalToWorldAngles(self:GetCustomModelAngOffset())})
         render.ModelMaterialOverride( nil )
     elseif self:GetThickness() == 0 or hook.Call("wp-allowthickportal", GAMEMODE, self, exitPortal)==false then
         -- Draw the face at the front of the render geometry (recessed for an inverted
