@@ -1227,3 +1227,99 @@ hook.Add( "PostDrawSkyBox", "WorldPortals_SkyClip", function()
         skyClipSaved = nil
     end
 end )
+
+-- Draw the 2D skybox ourselves when the exit camera sits in solid: the engine skips its own sky
+-- pass and clears to black there, so the sky would otherwise be missing through the portal.
+-- Each face: suffix, the direction from the camera to that face, and the quad's CCW rotation.
+local SKY_FACE_DEFS = {
+    { "bk", Vector(0, 1, 0),  180 }, { "ft", Vector(0, -1, 0), 180 },
+    { "lf", Vector(-1, 0, 0), 180 }, { "rt", Vector(1, 0, 0),  180 },
+    { "up", Vector(0, 0, 1),    0 }, { "dn", Vector(0, 0, -1),   0 },
+}
+-- The engine crops ~1 texel off each sky-face edge to hide the seams between faces; match it in UV
+-- space (510 of 512, scaled about the centre) so it holds whatever shape the texture is.
+local VOIDSKY_INSET = 510 / 512
+local skyFaces, skyName, skyCvar
+local function buildSkyFaces()
+    skyCvar = skyCvar or GetConVar("sv_skyname")
+    local name = skyCvar:GetString():lower()
+    if name == skyName and skyFaces then return end
+    skyName = name
+    skyFaces = {}
+    for _, d in ipairs(SKY_FACE_DEFS) do
+        local path = "skybox/" .. name .. d[1]
+        -- Use the texture the engine's sky material resolves to, not the path itself: an HDR sky points
+        -- $basetexture at a separate LDR texture, so loading the path raw samples HDR data and washes out.
+        local tex = Material(path):GetTexture("$basetexture")
+        local w, h = tex and tex:Width() or 1, tex and tex:Height() or 1
+        -- A short side texture (e.g. 512x256) is drawn at its real shape, not stretched to fill the
+        -- square face: scale it down, sit it against the top, and the texture's clamp smears the last
+        -- row down to the floor - exactly what the engine does.
+        local tf
+        if w ~= h then
+            tf = "center 0.5 0 scale " .. VOIDSKY_INSET .. " " .. (w / h * VOIDSKY_INSET) ..
+                " rotate 0 translate 0 " .. (1 - VOIDSKY_INSET)
+        else
+            tf = "center 0.5 0.5 scale " .. VOIDSKY_INSET .. " " .. VOIDSKY_INSET .. " rotate 0 translate 0 0"
+        end
+        local mat = CreateMaterial("wp_voidsky_" .. name .. "_" .. d[1], "UnlitGeneric", {
+            ["$basetexturetransform"] = tf,
+            ["$nofog"] = "1",
+            ["$nocull"] = "1",
+        })
+        if tex then mat:SetTexture("$basetexture", tex) end
+        -- The quad faces back at the camera, so its normal is just the opposite of its direction.
+        local dir = d[2]
+        skyFaces[#skyFaces + 1] = { mat = mat, dir = dir, normal = -dir, rot = d[3] }
+    end
+end
+
+-- Draw the sky cube centred on `origin`, returning the face distance. The sky is six flat quads whose
+-- corners reach further out than their faces, so keep the cube inside the far clip plane (half the far
+-- distance leaves margin) or the engine slices the corners off; then pin its depth to the far plane so
+-- any real geometry, near or far, still draws in front.
+local function drawSkyCube( origin )
+    buildSkyFaces()
+    local vs = render.GetViewSetup()
+    local dist = ( vs and vs.zfar or 28000 ) * 0.5
+    local size = 2 * dist
+    render.OverrideDepthEnable( true, false ) -- depth-test on, write off
+    render.DepthRange( 0.99999, 1 )
+    render.SuppressEngineLighting( true )
+    for _, f in ipairs( skyFaces ) do
+        render.SetMaterial( f.mat )
+        render.DrawQuadEasy( origin + f.dir * dist, f.normal, size, size, color_white, f.rot )
+    end
+    render.SuppressEngineLighting( false )
+    render.DepthRange( 0, 1 )
+    render.OverrideDepthEnable( false, false )
+    return dist
+end
+
+hook.Add( "PostDrawOpaqueRenderables", "WorldPortals_VoidSky", function( bDepth, bSky )
+    if not wp.drawing or bDepth or bSky then return end
+    local origin = wp.vieworigin
+    if not origin then return end
+    if bit.band( util.PointContents( origin ), CONTENTS_SOLID ) == 0 then return end
+    drawSkyCube( origin )
+end )
+
+-- Dev aid: worldportals_debug_voidsky 1 paints the reconstruction over the normal view to compare it
+-- against the engine's real 2D sky; 2 also outlines the 6 faces so the seams between them show.
+local dbgVoidSky = CreateClientConVar("worldportals_debug_voidsky", "0", true, false)
+hook.Add( "PostDrawTranslucentRenderables", "WorldPortals_VoidSkyDebug", function( bDepth, bSky )
+    local mode = dbgVoidSky:GetInt()
+    if mode == 0 or wp.drawing or bDepth or bSky then return end
+    local origin = EyePos()
+    local dist = drawSkyCube( origin )
+    if mode >= 2 then -- outline the 12 cube edges so the face seams are visible
+        local function C( x, y, z ) return origin + Vector( x * dist, y * dist, z * dist ) end
+        local edges = {
+            { C(-1,-1,-1), C(1,-1,-1) }, { C(-1,-1,1), C(1,-1,1) }, { C(-1,1,-1), C(1,1,-1) }, { C(-1,1,1), C(1,1,1) },
+            { C(-1,-1,-1), C(-1,1,-1) }, { C(-1,-1,1), C(-1,1,1) }, { C(1,-1,-1), C(1,1,-1) }, { C(1,-1,1), C(1,1,1) },
+            { C(-1,-1,-1), C(-1,-1,1) }, { C(-1,1,-1), C(-1,1,1) }, { C(1,-1,-1), C(1,-1,1) }, { C(1,1,-1), C(1,1,1) },
+        }
+        render.SetColorMaterialIgnoreZ()
+        for _, e in ipairs( edges ) do render.DrawLine( e[1], e[2], Color( 255, 0, 0 ), false ) end
+    end
+end )
