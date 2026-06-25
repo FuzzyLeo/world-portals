@@ -1248,29 +1248,36 @@ local function buildSkyFaces()
     skyFaces = {}
     for _, d in ipairs(SKY_FACE_DEFS) do
         local path = "skybox/" .. name .. d[1]
-        -- Use the texture the engine's sky material resolves to, not the path itself: an HDR sky points
-        -- $basetexture at a separate LDR texture, so loading the path raw samples HDR data and washes out.
-        local tex = Material(path):GetTexture("$basetexture")
-        local w, h = tex and tex:Width() or 1, tex and tex:Height() or 1
-        -- A short side texture (e.g. 512x256) is drawn at its real shape, not stretched to fill the
-        -- square face: scale it down, sit it against the top, and the texture's clamp smears the last
-        -- row down to the floor - exactly what the engine does.
-        local tf
-        if w ~= h then
-            tf = "center 0.5 0 scale " .. VOIDSKY_INSET .. " " .. (w / h * VOIDSKY_INSET) ..
-                " rotate 0 translate 0 " .. (1 - VOIDSKY_INSET)
+        local skyMat = Material(path)
+        local dir = d[2] -- the quad faces back at the camera, so its normal is the opposite direction
+        if skyMat:GetShader() == "g_sky" then
+            -- A procedural GMod sky (gm_construct's "painted") shades a gradient + clouds in its own
+            -- shader with no face textures, so draw the engine material straight onto the quad as-is.
+            skyFaces[#skyFaces + 1] = { mat = skyMat, dir = dir, normal = -dir, rot = 0 }
         else
-            tf = "center 0.5 0.5 scale " .. VOIDSKY_INSET .. " " .. VOIDSKY_INSET .. " rotate 0 translate 0 0"
+            -- Use the texture the engine's sky material resolves to, not the path itself: an HDR sky
+            -- points $basetexture at a separate LDR texture, so loading the path raw samples HDR and
+            -- washes the colours out.
+            local tex = skyMat:GetTexture("$basetexture")
+            local w, h = tex and tex:Width() or 1, tex and tex:Height() or 1
+            -- A short side texture (e.g. 512x256) is drawn at its real shape, not stretched to fill the
+            -- square face: scale it down, sit it against the top, and the texture's clamp smears the last
+            -- row down to the floor - exactly what the engine does.
+            local tf
+            if w ~= h then
+                tf = "center 0.5 0 scale " .. VOIDSKY_INSET .. " " .. (w / h * VOIDSKY_INSET) ..
+                    " rotate 0 translate 0 " .. (1 - VOIDSKY_INSET)
+            else
+                tf = "center 0.5 0.5 scale " .. VOIDSKY_INSET .. " " .. VOIDSKY_INSET .. " rotate 0 translate 0 0"
+            end
+            local mat = CreateMaterial("wp_voidsky_" .. name .. "_" .. d[1], "UnlitGeneric", {
+                ["$basetexturetransform"] = tf,
+                ["$nofog"] = "1",
+                ["$nocull"] = "1",
+            })
+            if tex then mat:SetTexture("$basetexture", tex) end
+            skyFaces[#skyFaces + 1] = { mat = mat, dir = dir, normal = -dir, rot = d[3] }
         end
-        local mat = CreateMaterial("wp_voidsky_" .. name .. "_" .. d[1], "UnlitGeneric", {
-            ["$basetexturetransform"] = tf,
-            ["$nofog"] = "1",
-            ["$nocull"] = "1",
-        })
-        if tex then mat:SetTexture("$basetexture", tex) end
-        -- The quad faces back at the camera, so its normal is just the opposite of its direction.
-        local dir = d[2]
-        skyFaces[#skyFaces + 1] = { mat = mat, dir = dir, normal = -dir, rot = d[3] }
     end
 end
 
