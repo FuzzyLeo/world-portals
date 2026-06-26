@@ -1,8 +1,8 @@
--- Screen-space portal polygons: project a portal's visible face through a camera into screen
--- pixel coordinates, and intersect two such convex polygons. The render cull uses this to skip a
--- portal whose on-screen area falls entirely outside its parent's (cl_render's renderportals), and
--- the debug overlay draws the polygons. Pure 2D math - no render calls - so it lives apart from the
--- render pipeline. Polygons are flat arrays {x1, y1, x2, y2, ...}; vertex count is #poly/2.
+-- Screen polygons
+
+-- Project a portal's visible face through a camera into screen-space pixels, and intersect two such
+-- convex polygons. The render cull (cl_render) uses this to skip a portal hidden behind its parent's
+-- opening; the debug overlay draws them. Pure 2D math. Flat arrays {x1, y1, x2, y2, ...}.
 
 local NEAR_EPS = 1
 

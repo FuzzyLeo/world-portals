@@ -1,12 +1,10 @@
--- Void sky: when a portal exit camera lands in solid (out of bounds), the engine clears the view
--- black and skips the sky pass, so the sky is missing through the portal. We redraw it.
---
--- Two layers. The 2D sky is six flat quads of the map's skybox textures (drawSkyCube), the fallback
--- for any out-of-bounds view. The 3D sky reconstructs the sky_camera's parallax scenery (distant
--- hills/buildings): wp.RenderVoidSky3D renders that miniature scene to a render target in a frame-
--- start pre-pass, and the composite hook blits it as the far-plane backdrop - used on maps that have
--- a 3D skybox, with the 2D cube behind it. cl_render's renderportals triggers the 3D pre-pass for an
--- out-of-bounds exit; the composite hooks here paint whichever layer applies during the exit render.
+-- Void sky
+
+-- When a portal exit camera lands in solid (out of bounds), the engine clears black and skips the
+-- sky pass - so the sky is missing through the portal. We redraw it: a 2D skybox cube (six flat
+-- quads of the map's sky textures) for any out-of-bounds view, plus, on maps with a 3D skybox, the
+-- sky_camera's parallax scenery rendered to an RT by wp.RenderVoidSky3D and blitted as the far-plane
+-- backdrop. cl_render's renderportals triggers the 3D pre-pass; the composite hooks here paint it.
 
 -- Dev aid (WorldPortals_VoidSkyDebug below): paints the reconstruction over the normal view anywhere.
 local dbgVoidSky = CreateClientConVar( "worldportals_debug_voidsky", "0", true, false )
