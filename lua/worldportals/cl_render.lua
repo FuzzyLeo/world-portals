@@ -910,6 +910,121 @@ local function flattenRTAlpha(width, height)
     render.OverrideColorWriteEnable(false, false)
 end
 
+-- 3D skybox reconstruction for an out-of-bounds exit. When a portal exit camera lands in
+-- solid, the engine skips the sky pass, so the distant sky_camera scenery (the parallax
+-- miniature: far hills, buildings) is missing too. We render that scenery to a render target
+-- in a pre-pass, then the void hook composites it as the far-plane backdrop - the 3D extension
+-- of the 2D void sky, on whenever the map has a 3D skybox. The flat 2D cube stays the fallback,
+-- for maps with no 3D skybox or nested out-of-bounds views where the cheap cube is enough.
+-- Only top-level portals pay for the 3D pre-pass; deeper out-of-bounds views use the 2D cube.
+local VOIDSKY_3D_DEPTH = 1
+
+-- Dev aid (WorldPortals_VoidSkyDebug below): paints the reconstruction over the normal view
+-- anywhere. Declared here so the frame-start pre-pass in RenderScene can read it.
+local dbgVoidSky = CreateClientConVar( "worldportals_debug_voidsky", "0", true, false )
+
+local skyRTs = {}
+local function getSkyRT( w, h )
+    local tag = math.floor( w ) .. "x" .. math.floor( h )
+    local rt = skyRTs[tag]
+    if not rt then
+        -- Its own depth buffer (MATERIAL_RT_DEPTH_SEPARATE): the pre-pass clears depth, and a
+        -- buffer shared with the main view would wipe its depth so the far-plane blit then paints
+        -- over everything. One surface per resolution - a render target is size-locked, so mono
+        -- and the smaller VR eyes each need their own (a shared name across sizes leaks surfaces).
+        rt = GetRenderTargetEx( "wp_voidsky3d_" .. tag, w, h, RT_SIZE_NO_CHANGE,
+            MATERIAL_RT_DEPTH_SEPARATE, bit.bor( 2, 4, 8, 256 ), 0, IMAGE_FORMAT_RGBA8888 )
+        skyRTs[tag] = rt
+    end
+    return rt
+end
+
+-- zfar is the engine's MAX_TRACE_LENGTH so the whole miniature scene fits; viewid 1
+-- (VIEW_3DSKY) matches the portal renders and avoids the halo/visibility corruption viewid 0
+-- reintroduces.
+local skyView = {
+    x = 0, y = 0,
+    drawviewmodel = false, drawhud = false, drawmonitors = false,
+    dopostprocess = false, bloomtone = false,
+    znear = 2, zfar = 56756, viewid = 1,
+}
+-- exitPos/exitForward (the exit portal's plane, world space) clip the skybox to the same side the
+-- real exit view shows - omitted by the debug overlay, which has no portal.
+local function renderVoidSky3D( camOrigin, camAngle, w, h, fov, aspect, exitPos, exitForward )
+    local sky = wp.sky3d
+    if not sky then return nil end
+    local scale = sky.scale
+    local invScale = scale > 0 and ( 1 / scale ) or 1
+    -- The skybox camera sits at the scaled-down view position offset by the sky_camera origin.
+    local skyOrigin = camOrigin * invScale + sky.origin
+
+    local effAspect = aspect or ( w / h )
+    local rt = getSkyRT( w, h )
+    skyView.origin = skyOrigin
+    skyView.angles = camAngle
+    skyView.w, skyView.h = w, h
+    skyView.fov = fov
+    skyView.aspectratio = effAspect
+
+    -- skyOrigin can land just inside the skybox's own geometry (the miniature buildings/ground sit
+    -- right where it falls). The 3D scenery still renders fine from there, but the engine skips the
+    -- skybox's 2D sky and leaves it black behind the scenery - flag it so the fill hook paints the
+    -- 2D sky back in during the render below. (Don't just bail to the 2D cube; that loses the
+    -- skyline for a thin band as an exit camera grazes the skybox surface.)
+    wp.renderingSkyInSolid = bit.band( util.PointContents( skyOrigin ), CONTENTS_SOLID ) ~= 0
+    wp.renderingSkyOrigin = skyOrigin
+
+    -- A buried exit camera sits inside the wall/foliage the portal is set into, so the skybox would
+    -- otherwise render that geometry between the camera and the opening (the "giant leaf" over the
+    -- portal). Clip it the same way the exit world view does - at the portal plane - so only what's
+    -- in front of the opening (the skyline) survives. The plane is the exit plane scaled into skybox
+    -- space: same normal (scale doesn't rotate it), distance through the scaled point on it.
+    local clip = exitPos and exitForward
+    local oldClip
+    if clip then
+        local d = exitForward:Dot( exitPos ) * invScale + exitForward:Dot( sky.origin )
+        oldClip = render.EnableClipping( true )
+        render.PushCustomClipPlane( exitForward, d )
+    end
+
+    wp.renderingSky = true
+    render.PushRenderTarget( rt )
+        render.Clear( 0, 0, 0, 255, true, true )
+        render.RealRenderView( skyView )
+    render.PopRenderTarget()
+    wp.renderingSky = false
+
+    if clip then
+        render.PopCustomClipPlane()
+        render.EnableClipping( oldClip )
+    end
+    -- The blit projects with the same fov/aspect the target was rendered with.
+    wp.currentSkyFov = fov
+    wp.currentSkyAspect = effAspect
+    return rt
+end
+
+-- A manual world render picks up the main map's fog, not the skybox's. Match the engine's 3D
+-- skybox (CSkyboxView::Enable3dSkyboxFog): the sky_camera's own linear fog, start/end scaled by
+-- 1/scale. Gated so it only touches the pre-pass, never the eye or exit views.
+hook.Add( "SetupWorldFog", "WorldPortals_VoidSky3D", function()
+    if not wp.renderingSky then return end
+    local sky = wp.sky3d
+    if not sky then return end
+    local fog = sky.fog
+    if not fog then
+        render.FogMode( MATERIAL_FOG_NONE )
+        return true
+    end
+    local invScale = sky.scale > 0 and ( 1 / sky.scale ) or 1
+    render.FogMode( MATERIAL_FOG_LINEAR )
+    render.FogStart( fog.start * invScale )
+    render.FogEnd( fog.stop * invScale )
+    render.FogColor( fog.color.r, fog.color.g, fog.color.b )
+    render.FogMaxDensity( fog.maxdensity )
+    return true
+end )
+
 function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd, parentPortal, aspect )
     if ( wp.drawing ) then return end
     if not enabled then return end
@@ -1115,6 +1230,14 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                         wp.renderportals(camOrigin, camAngle, width, height, fov, childDepth, cumulativePoly, exit_pos, exit_forward, portal, aspect)
                     end
 
+                    -- Out-of-bounds exit: pre-render the 3D skybox now, while the sky isn't
+                    -- drawing yet (so the void hook can't fire), for that hook to blit as the
+                    -- far-plane backdrop during the exit render below.
+                    if depth <= VOIDSKY_3D_DEPTH
+                        and bit.band( util.PointContents( camOrigin ), CONTENTS_SOLID ) ~= 0 then
+                        wp.currentSkyRT = renderVoidSky3D( camOrigin, camAngle, width, height, fov, aspect, exit_pos, exit_forward )
+                    end
+
                     local oldDrawing = wp.drawing
                     local oldDrawingEnt = wp.drawingent
                     local oldDrawingDepth = wp.drawingdepth
@@ -1147,6 +1270,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     wp.drawingdepth = oldDrawingDepth
                     wp.drawtexturedepth = oldDrawTextureDepth
                     wp.drawportalsinview = oldDrawPortalsInView
+                    wp.currentSkyRT = nil
 
                     render.PopCustomClipPlane()
                     render.EnableClipping( oldClip )
@@ -1193,6 +1317,14 @@ hook.Add( "RenderScene", "WorldPortals_Render", function( plyOrigin, plyAngle, f
     wp.viewangle = plyAngle
     wp.viewfov = fov
     wp.renderportals(plyOrigin, plyAngle, ScrW(), ScrH(), fov)
+    -- Debug overlay: render the reconstruction here, at frame start, so its full-scene pre-pass
+    -- can't corrupt the main view's depth/state (a mid-frame render did - blanked the viewmodel
+    -- and dropped geometry). The WorldPortals_VoidSkyDebug hook then only blits this result.
+    if dbgVoidSky:GetBool() and wp.sky3d then
+        wp.overlaySkyRT = renderVoidSky3D( plyOrigin, plyAngle, ScrW(), ScrH(), fov, ScrW() / ScrH() )
+    else
+        wp.overlaySkyRT = nil
+    end
 end )
 
 -- While a portal's exit-view renders into its RT (wp.drawing), draw the local
@@ -1303,21 +1435,82 @@ local function drawSkyCube( origin )
     return dist
 end
 
+local skyBlitMat = CreateMaterial( "wp_voidsky3d_blit", "UnlitGeneric", {
+    ["$nofog"] = "1",
+    ["$nocull"] = "1",
+} )
+-- Paint the pre-rendered 3D-sky render target across the view as a backdrop. A screen quad
+-- ignores depth and would paint over the world, so project the target onto a quad out at the far
+-- plane (depth-test on, write off) so real geometry still draws in front. The quad is sized to
+-- the view frustum and screen-mapped, matching the fov/aspect the target was rendered with.
+local function drawSkyBlit( rt )
+    skyBlitMat:SetTexture( "$basetexture", rt )
+    local origin = wp.vieworigin or EyePos()
+    local ang = wp.viewangle or EyeAngles()
+    local fwd, right, up = ang:Forward(), ang:Right(), ang:Up()
+    local fov = wp.currentSkyFov or wp.viewfov or 90
+    local aspect = wp.currentSkyAspect or ( ( wp.viewwidth or ScrW() ) / ( wp.viewheight or ScrH() ) )
+    local vs = render.GetViewSetup()
+    local d = ( vs and vs.zfar or 28000 ) * 0.5
+    local hw = d * math.tan( math.rad( fov ) * 0.5 )
+    local hh = hw / aspect
+    local c = origin + fwd * d
+    local tl, tr = c - right * hw + up * hh, c + right * hw + up * hh
+    local br, bl = c + right * hw - up * hh, c - right * hw - up * hh
+    -- The exit view's clip plane would slice this far quad when looking oblique; the backdrop
+    -- never needs it (the opening composite confines it), so disable clipping around it.
+    local oldClip = render.EnableClipping( false )
+    render.OverrideDepthEnable( true, false )
+    render.DepthRange( 0.99999, 1 )
+    render.SetMaterial( skyBlitMat )
+    mesh.Begin( MATERIAL_QUADS, 1 )
+        mesh.Position( tl ); mesh.TexCoord( 0, 0, 0 ); mesh.AdvanceVertex()
+        mesh.Position( tr ); mesh.TexCoord( 0, 1, 0 ); mesh.AdvanceVertex()
+        mesh.Position( br ); mesh.TexCoord( 0, 1, 1 ); mesh.AdvanceVertex()
+        mesh.Position( bl ); mesh.TexCoord( 0, 0, 1 ); mesh.AdvanceVertex()
+    mesh.End()
+    render.DepthRange( 0, 1 )
+    render.OverrideDepthEnable( false, false )
+    render.EnableClipping( oldClip )
+end
+
+-- During the 3D pre-pass, if skyOrigin sits inside the skybox geometry the engine skips the
+-- skybox's own 2D sky (black behind the scenery) - paint it back in with the 2D cube, depth-tested
+-- so the 3D scenery still occludes it. Fires only inside the pre-pass (wp.renderingSky).
+hook.Add( "PostDrawOpaqueRenderables", "WorldPortals_VoidSkyFill", function( bDepth, bSky )
+    if not wp.renderingSky or not wp.renderingSkyInSolid or bDepth or bSky then return end
+    local origin = wp.renderingSkyOrigin
+    if not origin then return end
+    drawSkyCube( origin )
+end )
+
 hook.Add( "PostDrawOpaqueRenderables", "WorldPortals_VoidSky", function( bDepth, bSky )
     if not wp.drawing or bDepth or bSky then return end
     local origin = wp.vieworigin
     if not origin then return end
     if bit.band( util.PointContents( origin ), CONTENTS_SOLID ) == 0 then return end
-    drawSkyCube( origin )
+    -- The 3D pre-pass RT (both skybox scenery and the 2D sky behind it) when we have one;
+    -- otherwise the standalone 2D cube.
+    if wp.currentSkyRT then
+        drawSkyBlit( wp.currentSkyRT )
+    else
+        drawSkyCube( origin )
+    end
 end )
 
--- Dev aid: worldportals_debug_voidsky 1 paints the reconstruction over the normal view to compare it
--- against the engine's real 2D sky; 2 also outlines the 6 faces so the seams between them show.
-local dbgVoidSky = CreateClientConVar("worldportals_debug_voidsky", "0", true, false)
+-- Dev aid: worldportals_debug_voidsky 1 paints the reconstruction over the normal view anywhere
+-- (no portal needed) to compare it against the engine's real sky - the 3D skybox where the map
+-- has one (pre-rendered at frame start in RenderScene), else the 2D cube; 2 also outlines the
+-- cube faces so the seams between them show.
 hook.Add( "PostDrawTranslucentRenderables", "WorldPortals_VoidSkyDebug", function( bDepth, bSky )
+    if wp.renderingSky then return end -- don't draw inside the frame-start pre-pass
     local mode = dbgVoidSky:GetInt()
     if mode == 0 or wp.drawing or bDepth or bSky then return end
-    local origin = EyePos()
+    if wp.overlaySkyRT then
+        drawSkyBlit( wp.overlaySkyRT )
+        return
+    end
+    local origin = wp.vieworigin or EyePos()
     local dist = drawSkyCube( origin )
     if mode >= 2 then -- outline the 12 cube edges so the face seams are visible
         local function C( x, y, z ) return origin + Vector( x * dist, y * dist, z * dist ) end

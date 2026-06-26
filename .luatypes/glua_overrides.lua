@@ -9,6 +9,10 @@
 ---@alias MATERIAL_FOG integer
 ---@alias STENCILOPERATION integer
 ---@alias STENCILCOMPARISONFUNCTION integer
+---@alias RT_SIZE integer
+---@alias MATERIAL_RT_DEPTH integer
+---@alias TEXTUREFLAGS integer
+---@alias CREATERENDERTARGETFLAGS integer
 
 -- The stub declares only the 3-arg `table.insert(tbl, position, value)` form, so calls
 -- like `table.insert(t, x)` against a narrowly-typed `t` mis-resolve and treat `x` as
