@@ -34,6 +34,9 @@ end
 function ENT:Draw()
     -- Bail unless this portal has something to show this frame.
     if not (wp.IsEnabled and wp.IsEnabled()) then return end
+    -- A portal sitting in the skybox PVS must not run its stencil pass during the void-sky
+    -- pre-pass (it would recurse into a render of its own).
+    if wp.renderingSky then return end
     if not self:GetOpen() then return end
     -- Inside another portal's RT pass that isn't drawing nested portals.
     if wp.drawing and not wp.drawportalsinview then return end
