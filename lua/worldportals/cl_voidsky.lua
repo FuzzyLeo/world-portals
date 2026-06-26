@@ -9,25 +9,31 @@
 -- Dev aid (WorldPortals_VoidSkyDebug below): paints the reconstruction over the normal view anywhere.
 local dbgVoidSky = CreateClientConVar( "worldportals_debug_voidsky", "0", true, false )
 
+-- GMod doesn't expose the TEXTUREFLAGS enum to Lua, so name the few we use here.
+local TEXTUREFLAGS_TRILINEAR = 2
+local TEXTUREFLAGS_CLAMPS = 4
+local TEXTUREFLAGS_CLAMPT = 8
+local TEXTUREFLAGS_NOMIP = 256
+
 local skyRTs = {}
 local function getSkyRT( w, h )
     local tag = math.floor( w ) .. "x" .. math.floor( h )
     local rt = skyRTs[tag]
     if not rt then
-        -- Its own depth buffer (MATERIAL_RT_DEPTH_SEPARATE): the pre-pass clears depth, and a
-        -- buffer shared with the main view would wipe its depth so the far-plane backdrop then paints
-        -- over everything. One surface per resolution - a render target is size-locked, so mono
-        -- and the smaller VR eyes each need their own (a shared name across sizes leaks surfaces).
-        rt = GetRenderTargetEx( "wp_voidsky3d_" .. tag, w, h, RT_SIZE_NO_CHANGE,
-            MATERIAL_RT_DEPTH_SEPARATE, bit.bor( 2, 4, 8, 256 ), 0, IMAGE_FORMAT_RGBA8888 )
+        -- An off-screen canvas to render the sky into, with its own depth buffer. Rendering the sky
+        -- wipes depth first (a fresh scene); if it shared the main view's buffer that wipe would blank
+        -- the real scene's depth too, and the far-away backdrop would then paint over everything. One
+        -- cached RT per screen size - they can't be resized, and reusing a name across sizes leaks.
+        rt = GetRenderTargetEx( "wp_voidsky3d_" .. tag, w, h, RT_SIZE_NO_CHANGE, MATERIAL_RT_DEPTH_SEPARATE,
+            bit.bor( TEXTUREFLAGS_TRILINEAR, TEXTUREFLAGS_CLAMPS, TEXTUREFLAGS_CLAMPT, TEXTUREFLAGS_NOMIP ),
+            0, IMAGE_FORMAT_RGBA8888 )
         skyRTs[tag] = rt
     end
     return rt
 end
 
--- zfar is the engine's MAX_TRACE_LENGTH so the whole miniature scene fits; viewid 1
--- (VIEW_3DSKY) matches the portal renders and avoids the halo/visibility corruption viewid 0
--- reintroduces.
+-- zfar is the engine's longest view distance (MAX_TRACE_LENGTH) so the whole miniature scene fits.
+-- viewid 1 (VIEW_3DSKY) matches the portal renders and dodges a halo/visibility glitch viewid 0 brings back.
 local skyView = {
     x = 0, y = 0,
     drawviewmodel = false, drawhud = false, drawmonitors = false,
@@ -63,8 +69,8 @@ function wp.RenderVoidSky3D( camOrigin, camAngle, w, h, fov, aspect, exitPos, ex
     -- A buried exit camera sits inside the wall/foliage the portal is set into, so the skybox would
     -- otherwise render that geometry between the camera and the opening (the "giant leaf" over the
     -- portal). Clip it the same way the exit world view does - at the portal plane - so only what's
-    -- in front of the opening (the skyline) survives. The plane is the exit plane scaled into skybox
-    -- space: same normal (scale doesn't rotate it), distance through the scaled point on it.
+    -- in front of the opening (the skyline) survives. It's the exit plane shrunk into skybox space -
+    -- same facing direction (scaling doesn't rotate it), positioned at the scaled-down opening.
     local clip = exitPos and exitForward
     local oldClip
     if clip then
@@ -125,16 +131,16 @@ hook.Add( "RenderScene", "WorldPortals_VoidSkyOverlay", function( plyOrigin, ply
     end
 end )
 
--- Draw the 2D skybox ourselves when the exit camera sits in solid: the engine skips its own sky
--- pass and clears to black there, so the sky would otherwise be missing through the portal.
--- Each face: suffix, the direction from the camera to that face, and the quad's CCW rotation.
+-- The six faces of the 2D skybox cube (the fallback when a map has no 3D skybox, and the sky drawn
+-- behind the 3D scenery). Each face: texture suffix, the direction from the camera to it, and the
+-- quad's rotation in degrees.
 local SKY_FACE_DEFS = {
     { "bk", Vector(0, 1, 0),  180 }, { "ft", Vector(0, -1, 0), 180 },
     { "lf", Vector(-1, 0, 0), 180 }, { "rt", Vector(1, 0, 0),  180 },
     { "up", Vector(0, 0, 1),    0 }, { "dn", Vector(0, 0, -1),   0 },
 }
--- The engine crops ~1 texel off each sky-face edge to hide the seams between faces; match it in UV
--- space (510 of 512, scaled about the centre) so it holds whatever shape the texture is.
+-- The engine crops ~1 texel off each sky-face edge to hide the seams between faces; we match that on
+-- the texture itself (510 of 512, scaled about its centre) so it works whatever shape the texture is.
 local VOIDSKY_INSET = 510 / 512
 local skyFaces, skyName, skyCvar
 local function buildSkyFaces()
@@ -204,10 +210,10 @@ local skyBackdropMat = CreateMaterial( "wp_voidsky3d_backdrop", "UnlitGeneric", 
     ["$nofog"] = "1",
     ["$nocull"] = "1",
 } )
--- Paint the pre-rendered 3D-sky render target across the view as a backdrop. A screen quad
--- ignores depth and would paint over the world, so project the target onto a quad out at the far
--- plane (depth-test on, write off) so real geometry still draws in front. The quad is sized to
--- the view frustum and screen-mapped, matching the fov/aspect the target was rendered with.
+-- Paint the pre-rendered 3D-sky target across the view as a backdrop. A full-screen quad ignores
+-- depth and would paint over the world, so we put it on a quad way out at the far plane (depth-test
+-- on, write off) so real geometry still draws in front. The quad's sized to fill the view and mapped
+-- to the screen, matching the fov/aspect the target was rendered with.
 local function drawSkyBackdrop( rt )
     skyBackdropMat:SetTexture( "$basetexture", rt )
     local origin = wp.vieworigin or EyePos()
