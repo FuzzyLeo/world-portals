@@ -684,10 +684,6 @@ local function flattenRTAlpha(width, height)
     render.OverrideColorWriteEnable(false, false)
 end
 
--- Depth cap for the out-of-bounds 3D skybox pre-pass (cl_voidsky.lua): only top-level portals
--- pay for it; deeper out-of-bounds views fall back to the cheaper 2D cube.
-local VOIDSKY_3D_DEPTH = 1
-
 function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, parentPoly, parentExitPos, parentExitFwd, parentPortal, aspect )
     if ( wp.drawing ) then return end
     if not enabled then return end
@@ -894,10 +890,9 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     end
 
                     -- Out-of-bounds exit: pre-render the 3D skybox now, while the sky isn't
-                    -- drawing yet (so the void hook can't fire), for that hook to blit as the
+                    -- drawing yet (so the void hook can't fire), for that hook to draw as the
                     -- far-plane backdrop during the exit render below.
-                    if depth <= VOIDSKY_3D_DEPTH
-                        and bit.band( util.PointContents( camOrigin ), CONTENTS_SOLID ) ~= 0 then
+                    if bit.band( util.PointContents( camOrigin ), CONTENTS_SOLID ) ~= 0 then
                         wp.currentSkyRT = wp.RenderVoidSky3D( camOrigin, camAngle, width, height, fov, aspect, exit_pos, exit_forward )
                     end
 
