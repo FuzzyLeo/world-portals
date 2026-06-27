@@ -100,7 +100,12 @@ function ENT:Draw()
         end
         render.SetColorModulation( 1, 1, 1 )
 
+        -- When shouldrender, this face only stamps the stencil (the exit view paints over it),
+        -- so skip its depth write: a depth-writing face makes the engine treat the portal as an
+        -- occluder and cull shadow-casting projected textures behind it.
+        if shouldrender then render.OverrideDepthEnable( true, false ) end
         self:DrawPortal(exitPortal)
+        if shouldrender then render.OverrideDepthEnable( false, false ) end
 
         if shouldrender then
             -- Now fill the stencilled opening (where stencil == 1) with the exit view.
