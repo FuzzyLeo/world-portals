@@ -1,4 +1,52 @@
 
+---@class linked_portal_door : Entity
+---@field WPPosX number
+---@field WPPosY number
+---@field WPPosZ number
+---@field WPFwdX number
+---@field WPFwdY number
+---@field WPFwdZ number
+---@field WPRtX number
+---@field WPRtY number
+---@field WPRtZ number
+---@field WPUpX number
+---@field WPUpY number
+---@field WPUpZ number
+---@field WPAngP number
+---@field WPAngY number
+---@field WPAngR number
+---@field WPEPOffX number
+---@field WPEPOffY number
+---@field WPEPOffZ number
+---@field WPEAOffP number
+---@field WPEAOffY number
+---@field WPEAOffR number
+---@field WPCacheFrame number
+---@field WPSortKey number
+---@field WPDepth1ChainKey string
+---@field WPLastChainKey string
+---@field WPLastChainKeyDepth number
+---@field WPLastChainKeyQX number
+---@field WPLastChainKeyQY number
+---@field WPLastChainKeyQZ number
+---@field WPDecKey string
+---@field WPDecKeyDepth number
+---@field WPDecKeyQX number
+---@field WPDecKeyQY number
+---@field WPDecKeyQZ number
+---@field WPLastRenderedChainKey string
+---@field WPLastRenderedDepth number
+---@field WPLastRenderedTexture ITexture
+---@field WPLastDrawChainKey string
+---@field WPLastDrawChainDepth number
+---@field WPLastDrawChainCam Vector
+---@field WPTexture1 ITexture
+---@field WPTexture1Width number
+---@field WPTexture1Height number
+---@field GetExit fun(self: linked_portal_door): linked_portal_door
+---@field SetTexture fun(self: linked_portal_door, texture: ITexture)
+---@field GetTexture fun(self: linked_portal_door): ITexture
+
 ENT.Type                = "anim"
 ENT.RenderGroup         = RENDERGROUP_BOTH -- fixes translucent stuff rendering behind the portal
 ENT.Spawnable           = false

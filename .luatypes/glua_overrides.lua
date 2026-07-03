@@ -14,6 +14,27 @@
 ---@alias TEXTUREFLAGS integer
 ---@alias CREATERENDERTARGETFLAGS integer
 
+---@type COLLISION_GROUP
+COLLISION_GROUP_WORLD = 20
+---@type COLLISION_GROUP
+COLLISION_GROUP_WEAPON = 11
+---@type STENCILOPERATION
+STENCIL_KEEP = 1
+---@type STENCILOPERATION
+STENCIL_REPLACE = 3
+---@type STENCILCOMPARISONFUNCTION
+STENCIL_EQUAL = 3
+---@type STENCILCOMPARISONFUNCTION
+STENCIL_ALWAYS = 8
+---@type RT_SIZE
+RT_SIZE_NO_CHANGE = 0
+---@type MATERIAL_RT_DEPTH
+MATERIAL_RT_DEPTH_SEPARATE = 1
+---@type MATERIAL_FOG
+MATERIAL_FOG_NONE = 0
+---@type MATERIAL_FOG
+MATERIAL_FOG_LINEAR = 1
+
 -- The stub declares only the 3-arg `table.insert(tbl, position, value)` form, so calls
 -- like `table.insert(t, x)` against a narrowly-typed `t` mis-resolve and treat `x` as
 -- the position. Add the 2-arg append-only overload.

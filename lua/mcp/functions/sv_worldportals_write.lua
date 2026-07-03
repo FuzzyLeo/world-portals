@@ -268,8 +268,9 @@ local function createBatch(args)
         if istable(spec) and isnumber(spec.link_to) then
             local j = spec.link_to
             if created[j] and j ~= i then
-                p:SetExit(created[j])
-                if bidirectional then created[j]:SetExit(p) end
+                local target = created[j]
+                p:SetExit(target)
+                if bidirectional then target:SetExit(p) end
             end
         elseif sharedExit then
             p:SetExit(sharedExit)
@@ -306,6 +307,7 @@ MCP:AddFunction({
     requires = { "worldportals_control" },
     handler = function(args)
         args = args or {}
+        ---@cast args table
 
         if istable(args.specs) then return createBatch(args) end
 

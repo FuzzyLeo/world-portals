@@ -1,6 +1,6 @@
 -- False worlds
 
----@type table<string, wp.FalseWorld>
+---@type table<string, worldportals_false_world>
 wp.falseworlds = wp.falseworlds or {}
 -- Client-only cache of long-lived ClientsideModel parts keyed by false-world id.
 -- Kept separate from wp.falseworlds so re-registering doesn't have to fight table.Copy.
@@ -38,7 +38,7 @@ local function ensureCache( id )
     return cache
 end
 
----@class wp.FalseWorldPart
+---@class worldportals_false_world_part
 ---@field model string
 ---@field rendergroup integer?
 ---@field color Vector?
@@ -46,13 +46,13 @@ end
 ---@field ang Angle?
 ---@field scale Vector?
 
----@class wp.FalseWorld
+---@class worldportals_false_world
 ---@field id string
 ---@field pos Vector?
 ---@field ang Angle?
 ---@field baselight Vector?
----@field skybox wp.FalseWorldPart?
----@field models table<string, wp.FalseWorldPart>
+---@field skybox worldportals_false_world_part?
+---@field models table<string, worldportals_false_world_part>
 ---@field lights LocalLight[]?
 
 -- Apply state that's static for the lifetime of the cached entity.
@@ -160,7 +160,7 @@ function wp.createfalseworld( portal, plyOrigin, plyAngle, width, height, fov )
                     end
                 end
                 if IsValid( part ) then
-                    ---@cast rawpart wp.FalseWorldPart
+                    ---@cast rawpart worldportals_false_world_part
                     local color = rawpart.color
                     if color then
                         render.SetColorModulation( color.x, color.y, color.z )
@@ -185,7 +185,7 @@ function wp.renderfalseworld( texture, portal, plyOrigin, plyAngle, width, heigh
         render.Clear( 0, 0, 0, 0, true, true )
         render.SetViewPort( 0, 0, ScrW(), ScrH() )
 
-        local oldFog = render.GetFogMode()
+        local oldFog = render.GetFogMode() --[[@as MATERIAL_FOG]]
         render.SuppressEngineLighting( true )
         render.FogMode( MATERIAL_FOG_NONE )
 

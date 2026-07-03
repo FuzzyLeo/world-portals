@@ -20,14 +20,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          path: world-portals
+
+      - name: Checkout gmod-addon-tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: AmyJeanes/gmod-addon-tools
+          # renovate: datasource=github-tags depName=AmyJeanes/gmod-addon-tools
+          ref: v0.2.0
+          path: gmod-addon-tools
+
+      - name: Checkout GMod-MCP-Server
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          repository: AmyJeanes/GMod-MCP-Server
+          ref: main
+          path: GMod-MCP-Server
 
       - name: Run glua_check
+        working-directory: world-portals
         shell: pwsh
         run: ./scripts/glua-check.ps1 -Sarif results.sarif
 
       - name: Upload SARIF
-        if: always() && hashFiles('results.sarif') != ''
+        if: always() && hashFiles('world-portals/results.sarif') != ''
         uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
         with:
-          sarif_file: results.sarif
+          sarif_file: world-portals/results.sarif
+          checkout_path: ${{ github.workspace }}/world-portals
           category: glua_check

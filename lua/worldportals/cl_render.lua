@@ -96,7 +96,7 @@ end
 -- camera is omitted (only one chain - the player view - so the RT stays
 -- stable across frames). At d>1 the camera is folded in so sibling chains
 -- with different cameras get distinct RTs and identical ones dedup.
----@param portal LinkedPortalDoor
+---@param portal linked_portal_door
 local function getChainKey(depth, camPos, portal)
     if depth <= 1 or not camPos then
         local key = portal.WPDepth1ChainKey
@@ -128,7 +128,7 @@ end
 -- in, so a second d=1 view in the same frame (a security monitor, an RT camera)
 -- gets its own decision instead of reusing the eye view's. Separate per-portal
 -- key fields so the two caches can't clobber each other.
----@param portal LinkedPortalDoor
+---@param portal linked_portal_door
 local function getDecisionKey(depth, camPos, portal)
     if not camPos then return getChainKey(depth, nil, portal) end
     local qx, qy, qz = quantizePos(camPos)
@@ -224,11 +224,11 @@ end
 -- The small d>1 RT pool is drained depth-first in iteration order, so in raw array order
 -- portals late in wp.portals starve. Sort the top level by on-screen prominence so the
 -- portal you're looking at claims pool slots first; depth-first then renders its subtree.
-local sortBuffer = {} ---@type LinkedPortalDoor[]
+local sortBuffer = {} ---@type linked_portal_door[]
 local function sortByPriorityDesc(a, b)
     return a.WPSortKey > b.WPSortKey
 end
----@return LinkedPortalDoor[] sorted, integer count
+---@return linked_portal_door[] sorted, integer count
 local function getSortedPortals(portals, camX, camY, camZ, fwdX, fwdY, fwdZ)
     local buf = sortBuffer -- shared buffer is safe: top-level renders never nest
     local n = #portals
@@ -260,8 +260,8 @@ end
 --   local.x = rel·forward, local.y = -(rel·right), local.z = rel·up.
 -- The yaw-180 mirror negates local.x/y; LocalToWorld is the symmetric
 -- inverse. Allocation-free in the common (no exit-angle-offset) path.
----@param portal LinkedPortalDoor
----@param exit_portal LinkedPortalDoor
+---@param portal linked_portal_door
+---@param exit_portal linked_portal_door
 local function transformPortalPosInto(out, vec, portal, exit_portal)
     cachePortalScalars(portal)
     cachePortalScalars(exit_portal)
@@ -305,8 +305,8 @@ local function transformPortalPosInto(out, vec, portal, exit_portal)
 end
 wp.TransformPortalPosInto = transformPortalPosInto
 
----@param portal LinkedPortalDoor
----@param exit_portal LinkedPortalDoor
+---@param portal linked_portal_door
+---@param exit_portal linked_portal_door
 local function transformPortalAngleInto(out, angle, portal, exit_portal)
     local l_angle = portal:WorldToLocalAngles(angle)
     l_angle:RotateAroundAxis(VECTOR_UP, 180)

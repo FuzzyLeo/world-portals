@@ -10,9 +10,13 @@
 local dbgVoidSky = CreateClientConVar( "worldportals_debug_voidsky", "0", true, false )
 
 -- GMod doesn't expose the TEXTUREFLAGS enum to Lua, so name the few we use here.
+---@type TEXTUREFLAGS
 local TEXTUREFLAGS_TRILINEAR = 2
+---@type TEXTUREFLAGS
 local TEXTUREFLAGS_CLAMPS = 4
+---@type TEXTUREFLAGS
 local TEXTUREFLAGS_CLAMPT = 8
+---@type TEXTUREFLAGS
 local TEXTUREFLAGS_NOMIP = 256
 
 local skyRTs = {}
@@ -25,8 +29,8 @@ local function getSkyRT( w, h )
         -- the real scene's depth too, and the far-away backdrop would then paint over everything. One
         -- cached RT per screen size - they can't be resized, and reusing a name across sizes leaks.
         rt = GetRenderTargetEx( "wp_voidsky3d_" .. tag, w, h, RT_SIZE_NO_CHANGE, MATERIAL_RT_DEPTH_SEPARATE,
-            bit.bor( TEXTUREFLAGS_TRILINEAR, TEXTUREFLAGS_CLAMPS, TEXTUREFLAGS_CLAMPT, TEXTUREFLAGS_NOMIP ),
-            0, IMAGE_FORMAT_RGBA8888 )
+            bit.bor( TEXTUREFLAGS_TRILINEAR, TEXTUREFLAGS_CLAMPS, TEXTUREFLAGS_CLAMPT, TEXTUREFLAGS_NOMIP ) --[[@as TEXTUREFLAGS]],
+            0 --[[@as CREATERENDERTARGETFLAGS]], IMAGE_FORMAT_RGBA8888 )
         skyRTs[tag] = rt
     end
     return rt
