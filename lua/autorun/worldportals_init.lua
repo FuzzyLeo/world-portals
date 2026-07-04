@@ -1,5 +1,7 @@
 
 --because worldportals is too long
+
+---@class wp
 wp = wp or {}
 
 function wp.LoadFolder( folder, noprefix )

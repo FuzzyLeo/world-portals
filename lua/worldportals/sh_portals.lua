@@ -13,6 +13,7 @@ local function rebuild()
     wp.portals = list
 end
 
+---@api
 function wp.RegisterPortal(portal)
     if registered[portal] then return end
     registered[portal] = true

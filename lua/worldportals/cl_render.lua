@@ -71,6 +71,7 @@ cvars.AddChangeCallback("worldportals_recurse_depth", function(convarName, oldVa
     recurseDepth = ClampRecurseDepth(newValue)
 end)
 
+---@api
 function wp.IsEnabled()
     return enabled
 end
