@@ -20,7 +20,7 @@ function ENT:DrawPortal(exitPortal)
     elseif self:GetThickness() == 0 or hook.Call("wp-allowthickportal", GAMEMODE, self, exitPortal)==false then
         -- Draw the face at the front of the render geometry (recessed for an inverted
         -- portal), matching the cull poly and the box/inverted stencils.
-        local fo = (self.RenderMin and self.RenderMax) and math.max(self.RenderMin.x, self.RenderMax.x) or 0
+        local fo = wp.PortalFaceOffset( self )
         render.DrawQuadEasy( self:GetPos() + self:GetForward() * fo, self:GetForward(), self:GetWidth(), self:GetHeight(), color_black, self:GetAngles().roll )
     elseif self:GetInverted() then
         for _,quad in ipairs(self.RenderQuads) do

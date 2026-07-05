@@ -504,12 +504,15 @@ function wp.shouldrender( portal, camOrigin, camAngle, camFOV )
     -- the inner camera lands inside the exit's thick volume by construction
     -- and would bounce-recurse forever.
     local thickness = portal:GetThickness()
-    local planeX, planeY, planeZ = ppx, ppy, ppz
-    if thickness > 0 and renderDepth <= 1 then
-        planeX = ppx - pfx * thickness
-        planeY = ppy - pfy * thickness
-        planeZ = ppz - pfz * thickness
+    local planeOffset
+    if thickness > 0 then
+        planeOffset = renderDepth <= 1 and -thickness or 0
+    else
+        planeOffset = wp.PortalFaceOffset( portal )
     end
+    local planeX = ppx + pfx * planeOffset
+    local planeY = ppy + pfy * planeOffset
+    local planeZ = ppz + pfz * planeOffset
     local behind = pfx * (camOrigin.x - planeX) + pfy * (camOrigin.y - planeY) + pfz * (camOrigin.z - planeZ) < 0
     if behind then
         frameShouldRenderCache[cacheKey] = 0

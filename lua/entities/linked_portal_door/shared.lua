@@ -43,6 +43,8 @@
 ---@field WPTexture1 ITexture
 ---@field WPTexture1Width number
 ---@field WPTexture1Height number
+---@field RenderMin Vector
+---@field RenderMax Vector
 ---@field GetExit fun(self: linked_portal_door): linked_portal_door
 ---@field SetTexture fun(self: linked_portal_door, texture: ITexture)
 ---@field GetTexture fun(self: linked_portal_door): ITexture

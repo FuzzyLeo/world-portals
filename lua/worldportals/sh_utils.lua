@@ -64,6 +64,12 @@ function wp.DistanceToPlane( object_pos, plane_pos, plane_forward )
         + plane_forward.z * (object_pos.z - plane_pos.z)
 end
 
+---@param portal linked_portal_door
+function wp.PortalFaceOffset( portal )
+    local rmin, rmax = portal.RenderMin, portal.RenderMax
+    return (rmin and rmax) and math.max( rmin.x, rmax.x ) or 0
+end
+
 local ANGLE_YAW_180 = Angle(0, 180, 0)
 local ANGLE_ZERO = Angle(0, 0, 0)
 local VECTOR_ORIGIN = Vector()
