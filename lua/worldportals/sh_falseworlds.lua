@@ -56,7 +56,7 @@ end
 ---@field baselight Vector?
 ---@field skybox worldportals_false_world_part?
 ---@field models table<string, worldportals_false_world_part>
----@field lights LocalLight[]?
+---@field lights table[]?
 
 -- Apply state that's static for the lifetime of the cached entity.
 ---@param rawpart worldportals_false_world_part

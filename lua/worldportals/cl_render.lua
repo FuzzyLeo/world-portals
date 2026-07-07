@@ -26,6 +26,7 @@ local THICK_PORTAL_POS = Vector()
 
 -- Reused across every render.RenderView call this frame to avoid allocating
 -- a fresh view struct per portal render (was driving GC hitches).
+---@type ViewData
 wp._renderView = {
     x = 0,
     y = 0,
