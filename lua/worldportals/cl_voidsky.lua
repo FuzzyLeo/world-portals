@@ -84,7 +84,6 @@ function wp.RenderVoidSky3D( camOrigin, camAngle, w, h, fov, aspect, exitPos, ex
     -- the skyline in front of the opening. The plane is the exit plane (exitPos/exitForward, world space)
     -- shrunk into skybox space - same facing direction (scaling doesn't rotate it), positioned at the
     -- scaled-down opening. The debug overlay has no portal, so it passes neither and skips this.
-    local clip = exitPos and exitForward
     local oldClip
     if exitPos and exitForward then
         local d = exitForward:Dot( exitPos ) * invScale + exitForward:Dot( sky.origin )
@@ -99,7 +98,7 @@ function wp.RenderVoidSky3D( camOrigin, camAngle, w, h, fov, aspect, exitPos, ex
     render.PopRenderTarget()
     wp.renderingSky = false
 
-    if clip then
+    if exitPos and exitForward then
         render.PopCustomClipPlane()
         render.EnableClipping( oldClip )
     end

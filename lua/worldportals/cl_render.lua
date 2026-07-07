@@ -578,7 +578,10 @@ if not render.RealRenderView then
 end
 
 local EMPTY={}
----@param view table? a ViewData-like table (also accepts the deprecated aspectratio/w/h aliases)
+-- view is an optional ViewData-like table (the shape render.RenderView takes); every field is
+-- optional and falls back to the current eye - origin->EyePos, angles->EyeAngles,
+-- width/height->ScrW/ScrH, fov->the aspect-corrected GetFOV. w/h/aspectratio are deprecated aliases.
+---@param view table?
 function WorldPortals_RenderView(view)
     local v=view or EMPTY
     local origin = v.origin or EyePos()
@@ -668,7 +671,6 @@ end)
 local framePortalRenderCount = 0
 local framePortalRenderByDepth = {}
 
----One recorded render/cull decision for the debug overlay (cl_debug.lua).
 ---@class wp_render_record
 ---@field portal linked_portal_door?
 ---@field depth number?
@@ -676,7 +678,6 @@ local framePortalRenderByDepth = {}
 ---@field camOrigin Vector
 ---@field camAngle Angle
 
----A wp_render_record that also tracks the cumulative ancestor-clipped polygon.
 ---@class wp_rendered_record : wp_render_record
 ---@field cumPoly number[]
 
