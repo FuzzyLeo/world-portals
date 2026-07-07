@@ -69,7 +69,7 @@ function wp.RenderVoidSky3D( camOrigin, camAngle, w, h, fov, aspect, exitPos, ex
     skyView.angles = camAngle
     skyView.w, skyView.h = w, h
     skyView.fov = fov
-    skyView.aspectratio = effAspect
+    skyView.aspect = effAspect
 
     -- skyOrigin is our camera inside the miniature skybox, and it can land buried in that world's own
     -- ground or buildings. The scenery still draws, but the engine won't render the sky from inside

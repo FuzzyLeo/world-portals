@@ -32,7 +32,7 @@ wp._renderView = {
     w = 0,
     h = 0,
     fov = 0,
-    aspectratio = nil,
+    aspect = nil,
     origin = nil,
     angles = nil,
     dopostprocess = false,
@@ -578,17 +578,14 @@ if not render.RealRenderView then
 end
 
 local EMPTY={}
--- view is an optional ViewData-like table (the shape render.RenderView takes); every field is
--- optional and falls back to the current eye - origin->EyePos, angles->EyeAngles,
--- width/height->ScrW/ScrH, fov->the aspect-corrected GetFOV. w/h/aspectratio are deprecated aliases.
----@param view table?
+---@param view ViewData?
 function WorldPortals_RenderView(view)
     local v=view or EMPTY
     local origin = v.origin or EyePos()
     local angles = v.angles or EyeAngles()
-    local width = v.width or v.w or ScrW()
-    local height = v.height or v.h or ScrH()
-    local aspect = v.aspectratio or (width / height)
+    local width = v.w or ScrW()
+    local height = v.h or ScrH()
+    local aspect = v.aspect or v.aspectratio or (width / height)
     local fov = v.fov
     if not fov then
         -- A view with no fov (a stereo/VR eye) must match the engine's actual rendered fov:
@@ -981,7 +978,7 @@ function wp.renderportals( plyOrigin, plyAngle, width, height, fov, depth, paren
                     rv.w = width
                     rv.h = height
                     rv.fov = fov
-                    rv.aspectratio = aspect
+                    rv.aspect = aspect
                     rv.origin = camOrigin
                     rv.angles = camAngle
                     rv.zfar = zfar

@@ -69,3 +69,8 @@ function table.insert(tbl, position, value) end
 ---@class ModelInfo
 ---@field HullMin Vector
 ---@field HullMax Vector
+
+-- glua-api's ViewData omits `aspectratio`, the deprecated-but-still-honored alias of `aspect`.
+-- Add it so a view carrying the legacy field type-checks (wp reads both, and emits `aspect`).
+---@class ViewData
+---@field aspectratio number?
