@@ -7,4 +7,4 @@ param()
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot/bootstrap.ps1"
 
-Build-GlobalHookOverloads -Root (Split-Path -Parent $PSScriptRoot) -Id wp
+Build-GlobalHookOverloads -Root (Split-Path -Parent $PSScriptRoot) -Id wp -Owns 'wp-*'
