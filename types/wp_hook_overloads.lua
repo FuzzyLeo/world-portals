@@ -11,6 +11,7 @@
 ---@overload fun(eventName: "wp-postrender", identifier: any, func: fun(portal: linked_portal_door, exitPortal: Entity, plyOrigin: Vector, depth: number, ...))
 ---@overload fun(eventName: "wp-predraw", identifier: any, func: fun(arg1: linked_portal_door, exitPortal: linked_portal_door, ...))
 ---@overload fun(eventName: "wp-prerender", identifier: any, func: fun(portal: linked_portal_door, exitPortal: Entity, plyOrigin: Vector, depth: number, ...))
+---@overload fun(eventName: "wp-shouldghost", identifier: any, func: fun(portal: linked_portal_door, ent: Entity, ...))
 ---@overload fun(eventName: "wp-shouldghostdraw", identifier: any, func: fun(arg1: Entity, ghostEnt: Entity, arg3: linked_portal_door, arg4: linked_portal_door, ...))
 ---@overload fun(eventName: "wp-shouldrender", identifier: any, func: fun(portal: linked_portal_door, exitPortal: linked_portal_door, camOrigin: Vector, camAngle: Angle, camFOV: number, renderDepth: any, ...))
 ---@overload fun(eventName: "wp-shouldtp", identifier: any, func: fun(portal: any, ply: Player, ...))
