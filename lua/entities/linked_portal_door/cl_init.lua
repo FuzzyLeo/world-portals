@@ -11,6 +11,13 @@ local function eyeInWater()
     return vo and bit.band( util.PointContents( vo ), CONTENTS_WATER ) ~= 0 or false
 end
 
+-- Reused across DrawPortal (which never nests) so the common face / box draw builds its
+-- position and normal from the per-frame cached scalars instead of allocating a Vector/Angle
+-- per portal per render pass.
+local POS_BUF = Vector()
+local FWD_BUF = Vector()
+local ANG_BUF = Angle()
+
 ---@param exitPortal linked_portal_door
 function ENT:DrawPortal(exitPortal)
     local customModel = self:GetCustomModel()
@@ -21,14 +28,22 @@ function ENT:DrawPortal(exitPortal)
     elseif self:GetThickness() == 0 or hook.Call("wp-allowthickportal", GAMEMODE, self, exitPortal)==false then
         -- Draw the face at the front of the render geometry (recessed for an inverted
         -- portal), matching the cull poly and the box/inverted stencils.
+        wp.CachePortalScalars( self )
         local fo = wp.PortalFaceOffset( self )
-        render.DrawQuadEasy( self:GetPos() + self:GetForward() * fo, self:GetForward(), self:GetWidth(), self:GetHeight(), color_black, self:GetAngles().roll )
+        POS_BUF.x = self.WPPosX + self.WPFwdX * fo
+        POS_BUF.y = self.WPPosY + self.WPFwdY * fo
+        POS_BUF.z = self.WPPosZ + self.WPFwdZ * fo
+        FWD_BUF.x, FWD_BUF.y, FWD_BUF.z = self.WPFwdX, self.WPFwdY, self.WPFwdZ
+        render.DrawQuadEasy( POS_BUF, FWD_BUF, self:GetWidth(), self:GetHeight(), color_black, self.WPAngR )
     elseif self:GetInverted() then
         for _,quad in ipairs(self.RenderQuads) do
             render.DrawQuad(self:LocalToWorld(quad[1]), self:LocalToWorld(quad[2]), self:LocalToWorld(quad[3]), self:LocalToWorld(quad[4]), color_black)
         end
     else
-        render.DrawBox(self:GetPos(), self:GetAngles(), self.RenderMin, self.RenderMax, color_black)
+        wp.CachePortalScalars( self )
+        POS_BUF.x, POS_BUF.y, POS_BUF.z = self.WPPosX, self.WPPosY, self.WPPosZ
+        ANG_BUF.p, ANG_BUF.y, ANG_BUF.r = self.WPAngP, self.WPAngY, self.WPAngR
+        render.DrawBox( POS_BUF, ANG_BUF, self.RenderMin, self.RenderMax, color_black )
     end
 end
 
