@@ -120,10 +120,7 @@ Developer HUD behind `worldportals_debug_predict` (default off). Buffers the las
 
 ## Conventions when adding code
 
-- **Pure Lua only — no GMod-Lua extensions.** No `//`, `continue`, `!=`, `&&`/`||`. Use `--`, `goto continue`, `~=`, `and`/`or`.
 - **Realm-prefix filenames** (`sh_`/`sv_`/`cl_`). Suffixes break the analyzer's realm heuristic.
-- **Comments: concise, why-not-what.** A couple of lines; reserve length for genuinely non-obvious rationale, and bias toward cutting — match the surrounding density, don't pad to essay length. Don't restate the code. Keep the *why* inline and self-contained — don't point a reader at an external doc (`memory/`, this file) or lean on a fragile cross-file pointer. Don't explain code by what it replaced (no "this replaces the old X that did Y") — state the live *why*, or the *why-not* for an obvious-but-wrong alternative. The hard-won why is worth keeping; the wall of prose around it isn't. Keep comments ASCII: use `->`, not `→`. For a dash use a single spaced hyphen; never a double `--` (reads as a second comment marker) or an em-dash (em-dashes are fine in this file's prose, nowhere else).
-- **Drop unused loop variables** rather than naming them: `for _, v in pairs(t)`, `for k in pairs(t)`, `for _ = 1, n do`. The `unused` lint is on — keep the noise floor at zero.
 - **Monkey-patching engine globals** (`util.TraceLine`, `render.RenderView`): capture the original under a `Real*` alias once, and reinstall in `InitPostEntity` so later-loading addons don't clobber it.
 - **Consumer hooks** all use `hook.Call(name, GAMEMODE, ...)`: `wp-shouldrender`, `wp-trace`, `wp-tracefilter`, `wp-shouldtp`, `wp-teleport`, `wp-allowthickportal`, `wp-shouldghostdraw`, `wp-nocollide`, `wp-predraw`/`postdraw`, `wp-prerender`/`postrender`. Don't change the calling convention without updating Doors (it hooks all of these).
 
@@ -141,12 +138,6 @@ The type-reference pages in the sibling `world-portals.wiki` repo are generated 
 
 `.luarc.json` configures `glua_ls`/`glua_check` (both EmmyLua-Analyzer-Rust) with `./.tools/glua-api` (GLua stubs) and `./.luatypes` (local overrides + the `vrmod` stub). VS Code extension: `Pollux.gmod-glua-ls`.
 
-**Setup (fresh clone, before touching `.lua`):** clone `gmod-addon-tools` beside this repo if it is not already present, then run `pwsh -File scripts/install-tools.ps1`. The script is a thin wrapper over the shared module, which provisions `glua_check`/`glua_ls`/stubs plus `emmylua_doc_cli` and MoonSharp for wiki generation. It is idempotent, so it is also the recovery path when diagnostics look wrong; the `glua-lsp:install-glua-ls` skill covers the same. The `glua-lsp` plugin auto-resolves `glua_ls` from `.tools/bin/` at launch; after a fresh install, `/reload-plugins`. Tool version bumps happen in `gmod-addon-tools/src/install.ps1`, then reach this repo as CI-gated Renovate pin-bump PRs.
-
-**Whole-repo scan:** `pwsh -File scripts/glua-check.ps1` (installs tooling on demand, runs `glua_check --warnings-as-errors`; CI calls the same). `glua_ls` only analyzes open/edited files, so use this to audit everything. Treat diagnostics as actionable only if your edit caused them — pre-existing noise on unrelated lines isn't in scope.
-
-LSP diagnostics/hover/jump are via the [`glua-lsp` plugin](https://github.com/AmyJeanes/gmod-claude-plugins) (wraps `glua_ls`, same engine as `glua_check`); `.claude/settings.json` declares the marketplace so contributors get prompted. Diagnostics arrive automatically after edits.
-
 ### Type annotations
 
 - **Trace redirection (`sh_teleport.lua`).** `util.RealTraceLine` returns a `TraceResult`, not the input `Trace`. The result is named `trace`, but `mask`/`filter` come off the input `data` — keep that straight; `trace.mask`/`trace.filter` would read fields a `TraceResult` lacks.
@@ -161,3 +152,45 @@ LSP diagnostics/hover/jump are via the [`glua-lsp` plugin](https://github.com/Am
 - **Multi-return** (`local mins, maxs = ent:GetCollisionBounds()`) flags the trailing value nilable even though the stub returns two non-nil Vectors. Re-assert with a typed local: `---@type Vector, Vector`.
 - **Iterator element types** - glua-api's `ipairs`/`pairs` stubs return a bare `function`, dropping the element type, so a typed container's loop var is loose and an element `---@class` never binds. Overriding the stubs generically does NOT win (library-vs-library merge). `---@cast v <Class>` the loop variable inside the body (the analyzer drops the cast across a nested-`if` join, so place it at the flagged access, not just the loop top).
 - **Record tables** (`wp.ghosts`, the debug event buffer, false-world parts) get a `---@class` + a typed container (`---@type table<Entity, wp.GhostRecord>`) or a typed `---@param`; a finding flowing through a function parameter clears cleanly that way.
+
+<!-- >>> GENERATED shared conventions (gmod-addon-tools) - do not edit; regen: scripts/generate-claude-md.ps1 >>> -->
+
+_Shared conventions for my GMod addons - generated from [`gmod-addon-tools/docs/gmod-addon-conventions.md`](https://github.com/AmyJeanes/gmod-addon-tools/blob/main/docs/gmod-addon-conventions.md). Edit it there, not in this file; the block below is overwritten by CI. Addon-specific guidance lives outside the markers._
+
+## Code style
+
+- **Pure Lua syntax only - no GMod-Lua extensions.** No `//` comments, no `continue`, no `!=`, no `&&`/`||`. Use `--`, `goto continue`, `~=`, `and`/`or`.
+- **Comments: concise, the _why_ not the _what_.** A couple of lines at most; reserve length for genuinely non-obvious rationale and bias toward cutting - match the surrounding density, don't pad to essay length. Don't restate the code, don't explain it by what it replaced, and keep the _why_ self-contained (no pointers to external docs or fragile cross-file references). Keep comments ASCII: `->` not an arrow, a single spaced hyphen for a dash (never a double `--`, which reads as a second comment marker, nor an em-dash).
+- **Drop the loop variable you don't use** rather than naming it: `for _, v in pairs(t)`, `for k in pairs(t)`, `for _ = 1, n do`. The `unused` lint is on - keep the noise floor at zero.
+- **Every `---@diagnostic disable` needs a paired reason** on the same or preceding line naming _why_ the rule is suppressed. The default is to fix the issue, not suppress it.
+
+## First-time setup (before touching `.lua` files)
+
+The tooling (`glua_check`, `glua_ls`, the GLua API stubs, and the wiki/typing type-model) is provisioned by the shared [`gmod-addon-tools`](https://github.com/AmyJeanes/gmod-addon-tools) module, cloned **beside this addon**. `scripts/install-tools.ps1` is a thin wrapper - `scripts/bootstrap.ps1` resolves the sibling module and it calls `Initialize-GmodTools`, so the version pins live once in the module and every addon runs the exact same engine.
+
+```bash
+git clone https://github.com/AmyJeanes/gmod-addon-tools ../gmod-addon-tools
+pwsh -File scripts/install-tools.ps1
+```
+
+It is idempotent - re-running is a no-op when the pinned versions are already present, so it is also the recovery path when diagnostics look wrong. After a fresh install, run `/reload-plugins` so Claude Code re-launches the LSP against the new binary.
+
+## Claude Code LSP integration (`glua-lsp` plugin)
+
+Diagnostics, hover, and jump-to-definition come from the [`glua-lsp` plugin](https://github.com/AmyJeanes/gmod-claude-plugins) (marketplace `AmyJeanes/gmod-claude-plugins`), which wraps the [`glua_ls`](https://github.com/Pollux12/gmod-glua-ls) server - the same EmmyLua-Analyzer-Rust engine as `glua_check`, running long-lived. Diagnostics arrive automatically after every edit; no hook involvement. `.claude/settings.json` declares the marketplace so contributors get prompted to install on first open, and the plugin auto-resolves `glua_ls` from this project's `.tools/bin/` at launch (no global install, no PATH plumbing). The `glua-lsp:install-glua-ls` skill covers the same recovery flow if symptoms appear later. Treat reported diagnostics as actionable only if your edit caused them - pre-existing noise on unrelated lines is not in scope for the current change.
+
+## Whole-repo scans (`scripts/glua-check.ps1`)
+
+`glua_ls` only analyzes files as they are opened or edited. To audit the whole repo at once, run `pwsh -File scripts/glua-check.ps1` - it provisions tooling on demand (no-op when present) and runs `glua_check --warnings-as-errors` against the workspace root. It takes no path filter, so it always scans everything; CI runs the same script. Useful after a fix ripples across the tree, or when picking the project up to surface latent issues the LSP hasn't opened yet.
+
+## Typing enforcement (`scripts/typing-check.ps1`)
+
+`glua_check` catches _wrong_ types but not _missing_ ones - an untyped param is a silent `any` it never flags. `Test-GmodTyping` (CI: `typing-check.yml`) closes that gap, failing the build on any of: an untyped param, annotation rot (a `---@param` for a param that no longer exists), a modeled function whose resolved return type contains `unknown`, or a hook fire-site argument that resolves to `unknown`. Satisfy it at the **source** - prefer a `---@param` / `---@return` / `---@class` annotation over a per-callsite `---@cast`, since annotations propagate to every caller. The only accepted escapes are explicit and greppable: `---@param x any` (a reviewed, genuine `any`), an `_` discard for a deliberately-unused arg, and a file-level `---@vendored` marker on third-party code.
+
+Where an addon fires its own hooks, callback payload params are typed by a generated `---@overload` catalogue (`scripts/generate-hook-types.ps1`, CI: `generate-hook-types.yml`) - do not hand-edit it; retype a payload at its `CallHook` / `hook.Run` site instead. Custom global-hook overloads are spliced into the provisioned `hook.lua` by `Initialize-GmodTools`, so after pulling a change to a generated fragment mid-session, re-run `scripts/install-tools.ps1` (it re-syncs) then `/reload-plugins` to refresh live types.
+
+## Bumping the shared tooling
+
+Tool versions and this conventions block are pinned to a `gmod-addon-tools` tag. Bump the version constants in `gmod-addon-tools/src/install.ps1` (or edit the shared docs); merging to the module's `main` auto-cuts a new tag, and Renovate then raises a pin-bump PR here that regenerates the affected artifacts and runs GLua Check before it merges. CI pins the module by tag (the `ref:` in each workflow); a local sibling checkout uses whatever branch it is on, so keep it on the pinned tag to mirror CI exactly.
+
+<!-- <<< END GENERATED shared conventions <<< -->
