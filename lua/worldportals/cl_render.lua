@@ -666,6 +666,7 @@ hook.Add("InitPostEntity", "WorldPortals_RenderView", function()
 end)
 
 local framePortalRenderCount = 0
+---@type table<integer, integer>
 local framePortalRenderByDepth = {}
 
 ---@class wp_render_record
