@@ -30,6 +30,14 @@ function wp.IsGhosting(ent)
     return wp.ghosts[ent] ~= nil
 end
 
+-- A crossable body with a model to clone (a brush "*N" model can't be ClientsideModel'd).
+---@param ent Entity
+local function isGhostableBody(ent)
+    if not wp.IsPhysicalMover(ent) then return false end
+    local mdl = ent:GetModel()
+    return mdl ~= nil and mdl ~= "" and mdl:sub(1, 1) ~= "*"
+end
+
 ---@param ent Entity
 local function isCandidate(ent)
     if not IsValid(ent) then return false end
@@ -42,8 +50,7 @@ local function isCandidate(ent)
     -- the ragdoll), so ghosting it draws a phantom over the corpse. The ragdoll
     -- itself still ghosts normally.
     if ent:IsPlayer() and not ent:Alive() then return false end
-    if ent:GetClass() ~= "prop_physics" and not ent:IsRagdoll()
-        and not ent:IsNPC() and not ent:IsPlayer() then return false end
+    if not isGhostableBody(ent) then return false end
     if ent:GetNoDraw() then return false end
     return true
 end
@@ -693,7 +700,7 @@ local REACH_FLOOR = 256
 ---@param ent Entity
 local function trackReach(ent)
     if not IsValid(ent) then return end
-    if ent:GetClass() == "prop_physics" or ent:IsRagdoll() or ent:IsNPC() or ent:IsPlayer() then
+    if isGhostableBody(ent) then
         local reach = reachOf(ent)
         reachByEnt[ent] = reach
         if reach > maxReach then maxReach = reach end
@@ -731,6 +738,13 @@ end)
 ---@param ent Entity
 local function wouldTeleport(portal, ent)
     return hook.Call("wp-shouldtp", GAMEMODE, portal, ent) ~= false
+end
+
+-- Ghost-only consumer veto (companion to wp-shouldtp).
+---@param portal linked_portal_door
+---@param ent Entity
+local function wouldGhost(portal, ent)
+    return hook.Call("wp-shouldghost", GAMEMODE, portal, ent) ~= false
 end
 
 hook.Add("Think", "WorldPortals_Ghosts", function()
@@ -774,7 +788,8 @@ hook.Add("Think", "WorldPortals_Ghosts", function()
             local ppos = portal:GetPos()
             local r = reachOf(portal) + math.max(maxReach, REACH_FLOOR)
             for _, ent in ipairs(ents.FindInSphere(ppos, r)) do
-                if isCandidate(ent) and straddles(ent, portal) and wouldTeleport(portal, ent) then
+                if isCandidate(ent) and not wp.RidesPortal(ent, portal) and straddles(ent, portal)
+                    and wouldTeleport(portal, ent) and wouldGhost(portal, ent) then
                     -- If straddling more than one portal, keep the nearest.
                     local prev = seen[ent]
                     if not prev then

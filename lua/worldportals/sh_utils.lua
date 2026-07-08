@@ -74,6 +74,33 @@ function wp.DistanceToPlane( object_pos, plane_pos, plane_forward )
         + plane_forward.z * (object_pos.z - plane_pos.z)
 end
 
+-- Classes never treated as a body crossing a portal.
+local PORTAL_EXCLUDED_CLASSES = {
+    linked_portal_door = true,
+    linked_portal_frame = true,
+}
+
+---@param ent Entity
+---@return boolean
+function wp.IsPhysicalMover( ent )
+    if PORTAL_EXCLUDED_CLASSES[ent:GetClass()] then return false end
+    return ent:GetMoveType() == MOVETYPE_VPHYSICS
+        or ent:IsRagdoll() or ent:IsNPC() or ent:IsPlayer()
+end
+
+-- The structure the portal is mounted on (its parent chain) - client-safe, unlike constraints.
+---@param ent Entity
+---@param portal linked_portal_door
+---@return boolean
+function wp.RidesPortal( ent, portal )
+    local p = portal:GetParent()
+    while IsValid(p) do
+        if p == ent then return true end
+        p = p:GetParent()
+    end
+    return false
+end
+
 ---@param portal linked_portal_door
 function wp.PortalFaceOffset( portal )
     local rmin, rmax = portal.RenderMin, portal.RenderMax

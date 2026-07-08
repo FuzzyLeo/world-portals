@@ -82,14 +82,15 @@ end
 function ENT:Touch( ent )
     if (not self:GetOpen()) or (not self:GetEnableTeleport()) then return end
     if ent:IsPlayer() then return end
+    -- Only a free physical body, not scripted/static geometry (a prop_dynamic the portal sits in).
+    if not wp.IsPhysicalMover( ent ) then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
     if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
 
-    -- Don't teleport or phase a prop that's part of the contraption this portal rides
-    -- on. Skip the check for an already-armed prop: its pass-through NoCollide is
-    -- itself a constraint, so the prop self-registers in the parent's network and
-    -- would wrongly match here - yet it armed only after passing this check clean.
+    -- Don't teleport the portal's mount (parent chain) or a prop welded into its contraption. The
+    -- weld check skips an already-armed prop, whose pass-through NoCollide would itself falsely match.
+    if wp.RidesPortal( ent, self ) then return end
     if IsValid( self:GetParent() ) and not (wp.nocollide[ent] and wp.nocollide[ent][self]) then
         for _,v in pairs( constraint.GetAllConstrainedEntities( self:GetParent() ) ) do
             if v == ent then return end
