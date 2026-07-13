@@ -143,8 +143,8 @@ function ENT:Initialize()
         if not self.EnableTeleportSetByMap then
             self:SetEnableTeleport(true)
         end
-        if not self.CollisionSetByMap then
-            self:SetCollisionEnabled(true)
+        if not self.EnableCollisionSetByMap then
+            self:SetEnableCollision(true)
         end
     end
 
@@ -180,7 +180,7 @@ function ENT:SetupDataTables()
     self:NetworkVar( "Bool", "Inverted" )
     self:NetworkVar( "Bool", "Open" )
     self:NetworkVar( "Bool", "EnableTeleport" )
-    self:NetworkVar( "Bool", "CollisionEnabled" )
+    self:NetworkVar( "Bool", "EnableCollision" )
 
     self:NetworkVar( "Vector", "ExitPosOffset" )
     self:NetworkVar( "Angle", "ExitAngOffset" )
@@ -221,7 +221,7 @@ function ENT:SetupDataTables()
     end)
 
     -- Apply the collision toggle to the server-only frame; notify fires pre-apply so forward `new`.
-    self:NetworkVarNotify("CollisionEnabled", function(ent, name, old, new)
+    self:NetworkVarNotify("EnableCollision", function(ent, name, old, new)
         if SERVER and IsValid(ent.CollisionFrame) then
             ent.CollisionFrame:SetCollisionEnabled(new)
         end

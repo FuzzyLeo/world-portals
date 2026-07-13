@@ -72,8 +72,8 @@ function ENT:KeyValue( key, value )
         self.OpenSetByMap = true
 
     elseif ( key == "startcollision" or key == "StartCollision" ) then
-        self:SetCollisionEnabled( tobool(value) )
-        self.CollisionSetByMap = true
+        self:SetEnableCollision( tobool(value) )
+        self.EnableCollisionSetByMap = true
 
     elseif ( string.Left( key, 2 ) == "On" ) then
         self:StoreOutput( key, value )
@@ -213,7 +213,7 @@ function ENT:RebuildCollisionFrame()
         self.CollisionFrame = f
     end
     f:BuildFrame(w, h, self:GetThickness())
-    f:SetCollisionEnabled(self:GetCollisionEnabled())
+    f:SetCollisionEnabled(self:GetEnableCollision())
     -- No-collide the (unparented) frame with the parent it sits in NOW, before the
     -- next physics tick: an overlapping solid hull would interpenetrate that parent
     -- and the physics solver would violently shove it away. The frame's Think
@@ -242,8 +242,8 @@ function ENT:AcceptInput( inputName, activator, caller, data )
     elseif ( inputName == "Close" ) then
         self:SetOpen( false )
     elseif ( inputName == "EnableCollision" ) then
-        self:SetCollisionEnabled( true )
+        self:SetEnableCollision( true )
     elseif ( inputName == "DisableCollision" ) then
-        self:SetCollisionEnabled( false )
+        self:SetEnableCollision( false )
     end
 end
