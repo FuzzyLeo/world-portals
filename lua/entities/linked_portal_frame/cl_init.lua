@@ -30,7 +30,7 @@ hook.Add("PostDrawTranslucentRenderables", "WorldPortals_DebugCollision", functi
             local slabs = fr:FrameSlabs(portal:GetWidth(), portal:GetHeight(), portal:GetThickness())
             if slabs then
                 local pos, ang = fr:GetPos(), fr:GetAngles()
-                local on = fr:GetCollisionGroup() == COLLISION_GROUP_WEAPON
+                local on = portal:GetCollisionEnabled()
                 local fill = on and FILL or FILL_OFF
                 local wire = on and WIRE or WIRE_OFF
                 for _, s in ipairs(slabs) do

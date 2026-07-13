@@ -143,6 +143,9 @@ function ENT:Initialize()
         if not self.EnableTeleportSetByMap then
             self:SetEnableTeleport(true)
         end
+        if not self.CollisionSetByMap then
+            self:SetCollisionEnabled(true)
+        end
     end
 
     self:SetMoveType( MOVETYPE_NONE )
@@ -177,6 +180,7 @@ function ENT:SetupDataTables()
     self:NetworkVar( "Bool", "Inverted" )
     self:NetworkVar( "Bool", "Open" )
     self:NetworkVar( "Bool", "EnableTeleport" )
+    self:NetworkVar( "Bool", "CollisionEnabled" )
 
     self:NetworkVar( "Vector", "ExitPosOffset" )
     self:NetworkVar( "Angle", "ExitAngOffset" )
@@ -214,6 +218,13 @@ function ENT:SetupDataTables()
     end)
     self:NetworkVarNotify("EnableTeleport", function(ent, name, old, new)
         if SERVER and not new then wp.DisarmPortal(ent) end
+    end)
+
+    -- Apply the collision toggle to the server-only frame; notify fires pre-apply so forward `new`.
+    self:NetworkVarNotify("CollisionEnabled", function(ent, name, old, new)
+        if SERVER and IsValid(ent.CollisionFrame) then
+            ent.CollisionFrame:SetCollisionEnabled(new)
+        end
     end)
 
     -- Re-extend the render bounds when the model or its offset/angle change. The model itself is
