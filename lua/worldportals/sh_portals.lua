@@ -33,6 +33,12 @@ hook.Add("EntityRemoved", "WorldPortals_Portals", function(ent)
     if registered[ent] then wp.UnregisterPortal(ent) end
 end)
 
+hook.Add("NetworkEntityCreated", "WorldPortals_Portals", function(ent)
+    if IsValid(ent) and ent:GetClass() == "linked_portal_door" then
+        wp.RegisterPortal(ent)
+    end
+end)
+
 for _, portal in ipairs(ents.FindByClass("linked_portal_door")) do
     registered[portal] = true
 end
