@@ -197,6 +197,18 @@ local function predictPlayerTeleport(ply, mv, cmd)
 end
 hook.Add("SetupMove", "WorldPortals_PredictTeleport", predictPlayerTeleport)
 
+-- True when `trace` reaches `portal` -- the portal is nearer than the first real obstruction. A door
+-- filling the portal's own opening (solid serverside only) is not one: wp-tracefilter names a portal's
+-- far-side door, so this portal's near door is its exit's, and hitting only that still reaches it.
+---@param portal {Entity: linked_portal_door, Distance: number, HitPos: Vector}
+---@param trace WPTraceResult
+---@return boolean
+local function portalReached(portal, trace)
+    if portal.Distance < trace.HitPos:Distance(trace.StartPos) then return true end
+    local exit = portal.Entity:GetExit()
+    return IsValid(exit) and trace.Entity == hook.Call("wp-tracefilter", GAMEMODE, exit)
+end
+
 hook.Add("EntityFireBullets", "WorldPortals_Bullets", function(ent,data)
     local src, dir, distance = data.Src, data.Dir, data.Distance
     if not src then return end
@@ -213,7 +225,7 @@ hook.Add("EntityFireBullets", "WorldPortals_Bullets", function(ent,data)
 
     local portal = wp.GetFirstPortalHit(src, dir)
 
-    if IsValid(portal.Entity) and portal.Distance < trace.HitPos:Distance(src) then
+    if IsValid(portal.Entity) and portalReached(portal, trace) then
         local localHitPos = portal.Entity:WorldToLocal(portal.HitPos)
         ---@type Vector, Vector
         local mins, maxs = portal.Entity:GetCollisionBounds()
@@ -243,7 +255,7 @@ function WorldPortals_TraceLine(data)
     ---@cast trace WPTraceResult
     local portal = wp.GetFirstPortalHit(trace.StartPos, trace.Normal)
 
-    if IsValid(portal.Entity) and portal.Distance < trace.HitPos:Distance(trace.StartPos) then
+    if IsValid(portal.Entity) and portalReached(portal, trace) then
         local localHitPos = portal.Entity:WorldToLocal(portal.HitPos)
         ---@type Vector, Vector
         local mins, maxs = portal.Entity:GetCollisionBounds()
