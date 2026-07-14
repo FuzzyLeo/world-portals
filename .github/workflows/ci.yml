@@ -50,3 +50,30 @@ jobs:
           sarif_file: world-portals/results.sarif
           checkout_path: ${{ github.workspace }}/world-portals
           category: glua_check
+
+  trigger-doors:
+    name: Trigger Doors beta build
+    needs: glua-check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      # Doors' dev CI bundles world-portals dev HEAD, so a Doors build that
+      # started after this commit already carries it - skip the redundant publish.
+      - name: Skip if Doors already built since this commit
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: |
+          commit_epoch=$(date -d '${{ github.event.head_commit.timestamp }}' +%s)
+          last=$(gh api '/repos/AmyJeanes/Doors/actions/workflows/ci.yml/runs?branch=dev&per_page=1' \
+                   --jq '.workflow_runs[0].created_at // empty')
+          if [ -n "$last" ] && [ "$(date -d "$last" +%s)" -gt "$commit_epoch" ]; then
+            echo "Doors already built at $last (after this commit) - skipping redundant beta publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch Doors beta build
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.TOKEN }}
+        run: gh workflow run ci.yml --repo AmyJeanes/Doors --ref dev -f publish=true -f addon=beta
