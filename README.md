@@ -1,4 +1,4 @@
-world-portals
+World Portals
 =
 World portals inspired by Overv's Portal Project and Portal 2's `linked_portal_door`.
 
