@@ -35,6 +35,62 @@ local function eligible(ent, portal)
     return true
 end
 
+-- A NoCollide binds no relative motion (and our own pass-through no-collides would
+-- otherwise bridge the mount/shell into the set), so it never groups a contraption.
+local RIGID_SKIP_TYPE = { NoCollide = true }
+
+---@class wp.ConstraintEnt
+---@field Entity Entity
+---@field World boolean
+
+---@class wp.Constraint
+---@field Type string
+---@field Entity wp.ConstraintEnt[]
+
+-- Walk `seed`'s constraint network over rigid edges only (weld/rope/axis/... - not
+-- NoCollide) and return every physics-bearing member, so a welded/roped contraption
+-- teleports as one rigid body: the same portal transform applied to every member in a
+-- single tick keeps the constraints satisfied. Returns nil to veto the whole move - the
+-- group is anchored to the world (can't move the map; GetAllConstrainedEntities hides
+-- the world, so we read con.Entity[i].World ourselves), reaches the portal's own mount
+-- (it "rides" the portal), or a member a consumer's wp-shouldtp rejects (atomic).
+---@param seed Entity
+---@param portal linked_portal_door
+---@return Entity[]?
+function wp.GatherRigidGroup(seed, portal)
+    local group, seen = {}, {}
+    local stack = { seed }
+    seen[seed] = true
+    while #stack > 0 do
+        local e = stack[#stack]
+        stack[#stack] = nil
+
+        if wp.RidesPortal(e, portal) then return nil end
+        if hook.Call("wp-shouldtp", GAMEMODE, portal, e) == false then return nil end
+
+        local cls = e:GetClass()
+        if cls ~= "linked_portal_door" and cls ~= "linked_portal_frame" then
+            if IsValid(e:GetPhysicsObject()) then
+                group[#group + 1] = e
+            end
+            for _, con in ipairs(constraint.GetTable(e)) do
+                ---@cast con wp.Constraint
+                if not RIGID_SKIP_TYPE[con.Type] then
+                    for _, info in pairs(con.Entity) do
+                        if info.World then return nil end
+                        local n = info.Entity
+                        if IsValid(n) and not seen[n] then
+                            seen[n] = true
+                            stack[#stack + 1] = n
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return group
+end
+
 -- The solids a transiting prop may phase, from the wp-nocollide hook - a consumer's
 -- structure isn't always engine-parented to the portal, so we can't discover it.
 ---@param portal linked_portal_door

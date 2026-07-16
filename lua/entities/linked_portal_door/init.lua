@@ -80,8 +80,73 @@ function ENT:KeyValue( key, value )
     end
 end
 
+local TP_REFIRE_COOLDOWN = 0.2   -- group bounce guard; ~cl_renderfollow's RAPID_WINDOW so a grouped rapid loop isn't latched off
+
+-- Move one body through the portal: transform pos/vel/angle, snapshot and re-apply a
+-- ragdoll's physics-object poses around SetPos, disarm the entry, fire outputs/hook,
+-- broadcast. Shared by the single-prop and rigid-group paths. Wake() matters for the
+-- group - a sleeping member won't re-register with the solver or triggers after SetPos.
+---@param ent Entity
+---@param portal linked_portal_door
+---@param exit linked_portal_door
+local function applyTeleport( ent, portal, exit )
+    local new_pos = wp.TransformPortalPos( ent:GetPos(), portal, exit )
+    local new_velocity = wp.TransformPortalVector( ent:GetVelocity(), portal, exit )
+    local new_angle = wp.TransformPortalAngle( ent:GetAngles(), portal, exit )
+
+    ---@type table<integer, {[1]: Vector, [2]: Angle}>?
+    local store
+    if ent:IsRagdoll() then
+        store={}
+        for i=0,ent:GetPhysicsObjectCount() do
+            local bone=ent:GetPhysicsObjectNum(i)
+            if IsValid(bone) then
+                store[i]={ent:WorldToLocal(bone:GetPos()),ent:WorldToLocalAngles(bone:GetAngles())}
+            end
+        end
+    end
+    ent:SetPos( new_pos )
+    ent:SetAngles( new_angle )
+    ent:SetVelocity( new_velocity )
+    local phys = ent:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:SetVelocityInstantaneous( new_velocity )
+        phys:Wake()
+    end
+
+    -- Disarm the entry explicitly - a SetPos teleport can skip its EndTouch, leaving the
+    -- prop no-collided against the entry's parent. The exit side arms via its own Touch.
+    wp.DisarmNoCollide( ent, portal )
+    portal:TriggerOutput("OnEntityTeleportFromMe", ent)
+    exit:TriggerOutput("OnEntityTeleportToMe", ent)
+    if store then
+        for i=0,ent:GetPhysicsObjectCount() do
+            local bone=ent:GetPhysicsObjectNum(i)
+            if IsValid(bone) and store[i] then
+                bone:SetPos(ent:LocalToWorld(store[i][1]))
+                bone:SetAngles(ent:LocalToWorldAngles(store[i][2]))
+                bone:SetVelocityInstantaneous(new_velocity)
+                bone:Wake()
+            end
+        end
+    end
+
+    ent:ForcePlayerDrop()
+
+    hook.Call("wp-teleport", GAMEMODE, portal, ent, new_pos, new_angle)
+    net.Start("WorldPortals_Teleport")
+        net.WriteEntity(portal)
+        net.WriteEntity(ent)
+        net.WriteVector(new_pos)
+        net.WriteAngle(new_angle)
+    net.Broadcast()
+end
+
 -- Teleportation for non-player entities (props/NPCs/ragdolls) only - players go
--- through the predicted SetupMove path in sh_teleport.lua.
+-- through the predicted SetupMove path in sh_teleport.lua. A welded/roped contraption
+-- teleports as one rigid body (wp.GatherRigidGroup): applying the same portal transform
+-- to every member in a single tick keeps the constraints satisfied, so the solver never
+-- sees a half-crossed contraption to snap.
 ---@param ent Entity
 function ENT:Touch( ent )
     if (not self:GetOpen()) or (not self:GetEnableTeleport()) then return end
@@ -90,6 +155,11 @@ function ENT:Touch( ent )
     if not wp.IsPhysicalMover( ent ) then return end
     local exit = self:GetExit()
     if not IsValid(exit) then return end
+
+    -- A group teleport stamps every member; the siblings' and the exit's re-Touch this
+    -- window must not re-fire it.
+    if ent.wpGroupTpAt and CurTime() - ent.wpGroupTpAt < TP_REFIRE_COOLDOWN then return end
+
     if hook.Call("wp-shouldtp", GAMEMODE, self, ent) == false then return end
 
     -- Don't teleport the portal's mount (parent chain) or a prop welded into its contraption. The
@@ -113,68 +183,91 @@ function ENT:Touch( ent )
     local normal = self:GetForward()
     if ent:GetVelocity():GetNormalized():Dot( normal ) >= 0 then return end
 
-    -- Teleport once the configured fraction of the prop's depth (measured along the
-    -- portal normal) has passed the plane. 0.5 = its centre; higher waits until more
-    -- of it has emerged.
-    local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
-    local half_depth = 0.5 * ( math.abs((maxs.x - mins.x) * ent:GetForward():Dot(normal))
-                             + math.abs((maxs.y - mins.y) * ent:GetRight():Dot(normal))
-                             + math.abs((maxs.z - mins.z) * ent:GetUp():Dot(normal)) )
-    local center = ent:LocalToWorld( ent:OBBCenter() )
-    local center_dist = wp.DistanceToPlane( center, self:GetPos(), normal )
-    -- Gate on the opening: the engine trigger over-fires for a thick, rotated portal.
-    local lc = self:WorldToLocal( center )
+    -- Touch fires per member; evaluate the whole rigid group only once per tick per portal.
+    local tick = engine.TickCount()
+    if ent.wpGroupTick == tick and ent.wpGroupPortal == self then return end
+    local group = wp.GatherRigidGroup( ent, self )
+    if not group then return end   -- anchored to the world / the portal's mount, or a member vetoed
+    for _, m in ipairs( group ) do
+        m.wpGroupTick = tick
+        m.wpGroupPortal = self
+    end
+
+    if #group <= 1 then
+        -- Single body: teleport once the configured fraction of the prop's depth (measured
+        -- along the portal normal) has passed the plane. 0.5 = its centre; higher waits
+        -- until more of it has emerged.
+        local mins, maxs = ent:OBBMins(), ent:OBBMaxs()
+        local half_depth = 0.5 * ( math.abs((maxs.x - mins.x) * ent:GetForward():Dot(normal))
+                                 + math.abs((maxs.y - mins.y) * ent:GetRight():Dot(normal))
+                                 + math.abs((maxs.z - mins.z) * ent:GetUp():Dot(normal)) )
+        local center = ent:LocalToWorld( ent:OBBCenter() )
+        local center_dist = wp.DistanceToPlane( center, self:GetPos(), normal )
+        -- Gate on the opening: the engine trigger over-fires for a thick, rotated portal.
+        local lc = self:WorldToLocal( center )
+        local cmins, cmaxs = self:GetCollisionBounds()
+        local in_face = lc.y >= cmins.y and lc.y <= cmaxs.y and lc.z >= cmins.z and lc.z <= cmaxs.z
+        if in_face and center_dist <= half_depth * (1 - 2 * cvTpFraction:GetFloat()) then
+            applyTeleport( ent, self, exit )
+        end
+        return
+    end
+
+    -- Rigid group: the same depth-fraction cvar, generalised to the whole contraption.
+    -- Project every member's OBB corners onto the portal normal for the group's extent and
+    -- depth-along-normal; the combined-bounds centre gates the opening; mass-weighted
+    -- momentum gates direction. At the default 0.9 the group jumps once ~90% of its depth
+    -- has passed (leading end pokes further out the entry, exit emergence stays clean);
+    -- lower the cvar to jump earlier.
+    local ppos = self:GetPos()
+    local nMin, nMax = math.huge, -math.huge
+    local minx, miny, minz = math.huge, math.huge, math.huge
+    local maxx, maxy, maxz = -math.huge, -math.huge, -math.huge
+    local totalMass, momentum = 0, Vector()
+    for _, m in ipairs( group ) do
+        local mmins, mmaxs = m:OBBMins(), m:OBBMaxs()
+        for cx = 0, 1 do for cy = 0, 1 do for cz = 0, 1 do
+            local corner = m:LocalToWorld( Vector(
+                cx == 0 and mmins.x or mmaxs.x,
+                cy == 0 and mmins.y or mmaxs.y,
+                cz == 0 and mmins.z or mmaxs.z ) )
+            local proj = (corner - ppos):Dot( normal )
+            if proj < nMin then nMin = proj end
+            if proj > nMax then nMax = proj end
+            if corner.x < minx then minx = corner.x end
+            if corner.y < miny then miny = corner.y end
+            if corner.z < minz then minz = corner.z end
+            if corner.x > maxx then maxx = corner.x end
+            if corner.y > maxy then maxy = corner.y end
+            if corner.z > maxz then maxz = corner.z end
+        end end end
+        local mp = m:GetPhysicsObject()
+        if IsValid( mp ) then
+            local mass = mp:GetMass()
+            totalMass = totalMass + mass
+            momentum:Add( m:GetVelocity() * mass )
+        end
+    end
+    if totalMass <= 0 then return end
+
+    -- Direction gate on the group's aggregate momentum: the seed can transiently reverse
+    -- on a spinning contraption while the bulk still advances.
+    if momentum:Dot( normal ) >= 0 then return end
+
+    -- In-face gate on the combined-bounds centre.
+    local gc = Vector( (minx + maxx) * 0.5, (miny + maxy) * 0.5, (minz + maxz) * 0.5 )
+    local lc = self:WorldToLocal( gc )
     local cmins, cmaxs = self:GetCollisionBounds()
-    local in_face = lc.y >= cmins.y and lc.y <= cmaxs.y and lc.z >= cmins.z and lc.z <= cmaxs.z
-    if in_face and center_dist <= half_depth * (1 - 2 * cvTpFraction:GetFloat()) then
+    if not (lc.y >= cmins.y and lc.y <= cmaxs.y and lc.z >= cmins.z and lc.z <= cmaxs.z) then return end
 
-            local new_pos = wp.TransformPortalPos( ent:GetPos(), self, exit )
-            local new_velocity = wp.TransformPortalVector( ent:GetVelocity(), self, exit )
-            local new_angle = wp.TransformPortalAngle( ent:GetAngles(), self, exit )
+    -- Depth-fraction gate: identical formula to the single-prop case, on the group extent.
+    local groupHalfDepth = 0.5 * (nMax - nMin)
+    local groupCentreDist = 0.5 * (nMin + nMax)
+    if groupCentreDist > groupHalfDepth * (1 - 2 * cvTpFraction:GetFloat()) then return end
 
-            ---@type table<integer, {[1]: Vector, [2]: Angle}>?
-            local store
-            if ent:IsRagdoll() then
-                store={}
-                for i=0,ent:GetPhysicsObjectCount() do
-                    local bone=ent:GetPhysicsObjectNum(i)
-                    if IsValid(bone) then
-                        store[i]={ent:WorldToLocal(bone:GetPos()),ent:WorldToLocalAngles(bone:GetAngles())}
-                    end
-                end
-            end
-            ent:SetPos( new_pos )
-            ent:SetAngles( new_angle )
-            ent:SetVelocity( new_velocity )
-            local phys = ent:GetPhysicsObject()
-            if IsValid(phys) then phys:SetVelocityInstantaneous( new_velocity ) end
-
-            -- Disarm the entry explicitly - a SetPos teleport can skip its EndTouch,
-            -- leaving the prop no-collided against the entry's parent. The exit side
-            -- arms via its own Touch as the prop emerges through it.
-            wp.DisarmNoCollide( ent, self )
-            self:TriggerOutput("OnEntityTeleportFromMe", ent)
-            exit:TriggerOutput("OnEntityTeleportToMe", ent)
-            if store then
-                for i=0,ent:GetPhysicsObjectCount() do
-                    local bone=ent:GetPhysicsObjectNum(i)
-                    if IsValid(bone) and store[i] then
-                        bone:SetPos(ent:LocalToWorld(store[i][1]))
-                        bone:SetAngles(ent:LocalToWorldAngles(store[i][2]))
-                        bone:SetVelocityInstantaneous(new_velocity)
-                    end
-                end
-            end
-            
-            ent:ForcePlayerDrop()
-            
-            hook.Call("wp-teleport", GAMEMODE, self, ent, new_pos, new_angle)
-            net.Start("WorldPortals_Teleport")
-                net.WriteEntity(self)
-                net.WriteEntity(ent)
-                net.WriteVector(new_pos)
-                net.WriteAngle(new_angle)
-            net.Broadcast()
+    for _, m in ipairs( group ) do
+        applyTeleport( m, self, exit )
+        m.wpGroupTpAt = CurTime()
     end
 end
 
