@@ -318,7 +318,9 @@ end
 ---@param rec wp.GhostRecord
 ---@param ghostEnt Entity
 local function ghostDrawVetoed(rec, ghostEnt)
-    return hook.Call("wp-shouldghostdraw", GAMEMODE, rec.ent, ghostEnt, rec.portal, rec.exit) == false
+    ---@type Entity
+    local sourceEnt = rec.ent
+    return hook.Call("wp-shouldghostdraw", GAMEMODE, sourceEnt, ghostEnt, rec.portal, rec.exit) == false
 end
 
 ---@param rec wp.GhostRecord
