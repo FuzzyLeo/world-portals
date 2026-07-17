@@ -52,8 +52,9 @@ local RIGID_SKIP_TYPE = { NoCollide = true }
 -- teleports as one rigid body: the same portal transform applied to every member in a
 -- single tick keeps the constraints satisfied. Returns nil to veto the whole move - the
 -- group is anchored to the world (can't move the map; GetAllConstrainedEntities hides
--- the world, so we read con.Entity[i].World ourselves), reaches the portal's own mount
--- (it "rides" the portal), or a member a consumer's wp-shouldtp rejects (atomic).
+-- the world, so we read con.Entity[i].World ourselves) or to map machinery (a brush
+-- mover like a func_door), reaches the portal's own mount (it "rides" the portal), or a
+-- member a consumer's wp-shouldtp rejects (atomic).
 ---@param seed Entity
 ---@param portal linked_portal_door
 ---@return Entity[]?
@@ -70,6 +71,9 @@ function wp.GatherRigidGroup(seed, portal)
 
         local cls = e:GetClass()
         if cls ~= "linked_portal_door" and cls ~= "linked_portal_frame" then
+            -- A physics shadow makes a brush/scripted mover (func_door) look constrainable,
+            -- but it's map machinery - same bucket as a world anchor: veto, don't derail it.
+            if not wp.IsPhysicalMover(e) then return nil end
             if IsValid(e:GetPhysicsObject()) then
                 group[#group + 1] = e
             end
@@ -79,7 +83,9 @@ function wp.GatherRigidGroup(seed, portal)
                     for _, info in pairs(con.Entity) do
                         if info.World then return nil end
                         local n = info.Entity
-                        if IsValid(n) and not seen[n] then
+                        -- Never walk into a player (they teleport only via the predicted
+                        -- SetupMove path), so a player-roped prop keeps its per-body crossing.
+                        if IsValid(n) and not seen[n] and not n:IsPlayer() then
                             seen[n] = true
                             stack[#stack + 1] = n
                         end
