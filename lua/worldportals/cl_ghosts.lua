@@ -315,12 +315,12 @@ end
 -- region hidden from the open world (e.g. an interior tucked in the skybox), it must
 -- draw only in that region's portal RT, not the main scene. Per-draw, NOT cached
 -- (the answer differs between passes within one frame).
----@param rec wp.GhostRecord
+---@param sourceEnt Entity
 ---@param ghostEnt Entity
-local function ghostDrawVetoed(rec, ghostEnt)
-    ---@type Entity
-    local sourceEnt = rec.ent
-    return hook.Call("wp-shouldghostdraw", GAMEMODE, sourceEnt, ghostEnt, rec.portal, rec.exit) == false
+---@param portal linked_portal_door
+---@param exit linked_portal_door
+local function ghostDrawVetoed(sourceEnt, ghostEnt, portal, exit)
+    return hook.Call("wp-shouldghostdraw", GAMEMODE, sourceEnt, ghostEnt, portal, exit) == false
 end
 
 ---@param rec wp.GhostRecord
@@ -335,7 +335,7 @@ local function makeGhostOverride(rec)
         -- else's ghost casts a shadow, clipped to the exit half by clipToHalf below.
         if rec.isLocalPlayer and bit.band(flags, STUDIO_SHADOWDEPTHTEXTURE) ~= 0 then return end
         if localGhostIsCutaway(rec) then return end
-        if ghostDrawVetoed(rec, self) then return end
+        if ghostDrawVetoed(ent, self, rec.portal, rec.exit) then return end
         -- Past GHOST_GRACE the throttled (25Hz) scan hasn't removed this ghost yet, but you
         -- may have moved far enough that the source is no longer force-drawn in the recursion
         -- - its bones then read as the bind pose and a skeletal ghost copies a T-pose on the
@@ -383,7 +383,7 @@ local function makeWeaponGhostOverride(rec)
         if not (IsValid(rec.portal) and IsValid(rec.exit)) then return end
         if rec.isLocalPlayer and bit.band(flags, STUDIO_SHADOWDEPTHTEXTURE) ~= 0 then return end  -- local player's own ghost stays shadowless (see makeGhostOverride)
         if localGhostIsCutaway(rec) then return end
-        if ghostDrawVetoed(rec, self) then return end
+        if ghostDrawVetoed(rec.ent, self, rec.portal, rec.exit) then return end
         if SysTime() - rec.lastSeen > GHOST_GRACE then return end  -- stop at grace, no bind-pose flash (see makeGhostOverride)
         copyBonesThroughPortal(rec, IsValid(rec.weaponPose) and rec.weaponPose or w, self)
         updateExitPlane(rec)
