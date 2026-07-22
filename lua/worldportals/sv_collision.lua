@@ -109,8 +109,10 @@ end
 ---@param portal linked_portal_door
 ---@return Entity[]?
 function wp.GatherRigidGroup(startEnt, portal)
+    -- The analyzer sees the false values stored below as boolean, missing the false-only union.
+    ---@diagnostic disable-next-line: assign-type-mismatch
+    if not groupCache[portal] then groupCache[portal] = {} end
     local pc = groupCache[portal]
-    if not pc then pc = {}; groupCache[portal] = pc end
 
     local cached = pc[startEnt]
     if cached ~= nil then
@@ -188,6 +190,7 @@ function wp.ArmNoCollide(portal, ent)
         wp.nocollide[ent] = recs
     end
 
+    ---@type Entity[]
     local cons = {}
     for _, s in ipairs(gatherPhaseSolids(portal, ent)) do
         local c = constraint.NoCollide(ent, s, 0, 0, true)

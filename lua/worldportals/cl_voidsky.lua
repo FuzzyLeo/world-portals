@@ -40,12 +40,15 @@ end
 
 -- zfar is the engine's longest view distance (MAX_TRACE_LENGTH) so the whole miniature scene fits.
 -- viewid 1 (VIEW_3DSKY) matches the portal renders and dodges a halo/visibility glitch viewid 0 brings back.
+-- The engine treats every ViewData field as optional; the missing ones are set before each render.
+-- Fixed on the wiki (2026-07-22); removable once the annotations re-scrape it.
+---@diagnostic disable-next-line: missing-fields
 local skyView = {
     x = 0, y = 0,
     drawviewmodel = false, drawhud = false, drawmonitors = false,
     dopostprocess = false, bloomtone = false,
     znear = 2, zfar = 56756, viewid = 1,
-}
+} --[[@as ViewData]]
 
 ---@param camOrigin Vector
 ---@param camAngle Angle

@@ -14,6 +14,7 @@ function wp_.IsPortal(ent)
 end
 
 ---@param entindex any schema arg, validated below
+---@return linked_portal_door? portal, string? err
 function wp_.ResolvePortal(entindex)
     if type(entindex) ~= "number" then
         return nil, "`entindex` must be a number"
@@ -22,6 +23,8 @@ function wp_.ResolvePortal(entindex)
     if not wp_.IsPortal(ent) then
         return nil, "no linked_portal_door at entindex " .. entindex
     end
+    -- IsPortal guarantees the class
+    ---@cast ent linked_portal_door
     return ent
 end
 
@@ -264,7 +267,9 @@ function wp_.PortalRow(p, center, fields)
     return row
 end
 
+---@return linked_portal_door[]
 function wp_.AllPortals()
+    ---@type linked_portal_door[]
     local list = {}
     if istable(wp) and istable(wp.portals) then
         for _, p in ipairs(wp.portals) do

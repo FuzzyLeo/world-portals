@@ -201,7 +201,7 @@ hook.Add("SetupMove", "WorldPortals_PredictTeleport", predictPlayerTeleport)
 -- filling the portal's own opening (solid serverside only) is not one: wp-tracefilter names a portal's
 -- far-side door, so this portal's near door is its exit's, and hitting only that still reaches it.
 ---@param portal {Entity: linked_portal_door, Distance: number, HitPos: Vector}
----@param trace WPTraceResult
+---@param trace TraceResult
 ---@return boolean
 local function portalReached(portal, trace)
     if portal.Distance < trace.HitPos:Distance(trace.StartPos) then return true end
@@ -221,7 +221,6 @@ hook.Add("EntityFireBullets", "WorldPortals_Bullets", function(ent,data)
         endpos = src + dir * distance,
         filter = bulletFilter,
     } --[[@as Trace]])
-    ---@cast trace WPTraceResult
 
     local portal = wp.GetFirstPortalHit(src, dir)
 
@@ -246,13 +245,16 @@ hook.Add("EntityFireBullets", "WorldPortals_Bullets", function(ent,data)
 end)
 
 if not util.RealTraceLine then
-    util.RealTraceLine = util.TraceLine
+    -- A typed local keeps the detour below from leaking back into RealTraceLine's type.
+    ---@type fun(traceConfig: Trace): TraceResult
+    local engineTraceLine = util.TraceLine
+    util.RealTraceLine = engineTraceLine
 end
 
 ---@param data Trace
+---@return TraceResult
 function WorldPortals_TraceLine(data)
     local trace = util.RealTraceLine(data)
-    ---@cast trace WPTraceResult
     local portal = wp.GetFirstPortalHit(trace.StartPos, trace.Normal)
 
     if IsValid(portal.Entity) and portalReached(portal, trace) then

@@ -12,6 +12,10 @@ MCP:AddCapability({
 local PORTAL_CLASS = "linked_portal_door"
 local MAX_SPECS = 100
 
+-- Tool-created portals are tagged so bulk selectors can target only them.
+---@class linked_portal_door
+---@field mcp_spawned boolean?
+
 -- Measure a custom model's render-bounds centre (for custom_model_center). Un-Spawned prop, so no
 -- networking; precache first (server GetModelRenderBounds is nil for an unprecached model).
 ---@param model string
