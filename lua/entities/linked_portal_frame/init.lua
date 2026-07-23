@@ -92,6 +92,19 @@ function ENT:Think()
         return
     end
     local pos, ang = portal:GetPos(), portal:GetAngles()
+    -- Portal unmoved and hull converged: the shadow controller holds a
+    -- converged hull at its target on its own, so skip the pose and physics work.
+    if self.WPSettled and pos == self.LastShadowTarget
+        and ang.p == self.WPLastAngP and ang.y == self.WPLastAngY and ang.r == self.WPLastAngR then
+        local now = CurTime()
+        if not self.NextParentCheck or now >= self.NextParentCheck then
+            self.NextParentCheck = now + 1
+            wp.NoCollideFrame(self, portal)
+        end
+        self:NextThink(now)
+        return true
+    end
+    self.WPSettled = false
     if self:GetPos() ~= pos or self:GetAngles() ~= ang then
         self:SetPos(pos)
         self:SetAngles(ang)
@@ -113,14 +126,23 @@ function ENT:Think()
     end
     if IsValid(phys) then
         local last = self.LastShadowTarget
+        -- Wrap-aware angle compare: the hull can report an equivalent wrapped
+        -- angle (roll 360 vs 0), which exact Angle equality would re-sweep forever.
+        local pang = phys:GetAngles()
+        local angConverged = math.abs(math.AngleDifference(pang.p, ang.p)) < 0.05
+            and math.abs(math.AngleDifference(pang.y, ang.y)) < 0.05
+            and math.abs(math.AngleDifference(pang.r, ang.r)) < 0.05
         if (not last) or pos:Distance(last) > SHADOW_TELEPORT_DIST then
             phys:SetPos(pos)
             phys:SetAngles(ang)
-        elseif not phys:GetPos():IsEqualTol(pos, 0.05) or phys:GetAngles() ~= ang then
+        elseif not phys:GetPos():IsEqualTol(pos, 0.05) or not angConverged then
             phys:Wake()
             phys:UpdateShadow(pos, ang, FrameTime())
+        else
+            self.WPSettled = true
         end
         self.LastShadowTarget = pos
+        self.WPLastAngP, self.WPLastAngY, self.WPLastAngR = ang.p, ang.y, ang.r
     end
     -- Keep the (unparented) hull no-collided with its parent, so it doesn't
     -- interpenetrate the parent and shove it away. Low-frequency re-check picks up
