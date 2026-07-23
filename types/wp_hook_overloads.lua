@@ -16,6 +16,6 @@
 ---@overload fun(eventName: "wp-shouldrender", identifier: any, func: fun(portal: linked_portal_door, exitPortal: Entity, camOrigin: Vector, camAngle: Angle, camFOV: number, renderDepth: any, ...))
 ---@overload fun(eventName: "wp-shouldtp", identifier: any, func: fun(arg1: linked_portal_door, ent: Entity, ...))
 ---@overload fun(eventName: "wp-teleport", identifier: any, func: fun(portal: Entity, ent: Entity, new_pos: Vector, new_angle: Angle, ...))
----@overload fun(eventName: "wp-trace", identifier: any, func: fun(arg1: linked_portal_door, ...))
+---@overload fun(eventName: "wp-trace", identifier: any, func: fun(portalEnt: linked_portal_door, ...))
 ---@overload fun(eventName: "wp-tracefilter", identifier: any, func: fun(exit: linked_portal_door, ...))
 function hook.Add(eventName, identifier, func) end
