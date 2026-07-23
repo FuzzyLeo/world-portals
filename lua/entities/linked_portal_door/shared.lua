@@ -1,5 +1,6 @@
 
 ---@class linked_portal_door : Entity
+---@field WPPosCacheFrame number
 ---@field WPPosX number
 ---@field WPPosY number
 ---@field WPPosZ number

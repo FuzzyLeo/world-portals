@@ -179,11 +179,19 @@ end)
 -- Per-frame scalar cache for portal pose. Engine getters
 -- (GetPos/GetForward/...) each allocate a Vector; caching as plain numbers
 -- on the entity table eliminates that for every call after the first.
+-- Split in two tiers so portals culled by the sort never pay the full tier.
+---@param p linked_portal_door
+local function cachePortalPos(p)
+    if p.WPPosCacheFrame == frameCounter then return end
+    local pos = p:GetPos()
+    p.WPPosX, p.WPPosY, p.WPPosZ = pos.x, pos.y, pos.z
+    p.WPPosCacheFrame = frameCounter
+end
+
 ---@param p linked_portal_door
 local function cachePortalScalars(p)
     if p.WPCacheFrame == frameCounter then return end
-    local pos = p:GetPos()
-    p.WPPosX, p.WPPosY, p.WPPosZ = pos.x, pos.y, pos.z
+    cachePortalPos(p)
     local fwd = p:GetForward()
     p.WPFwdX, p.WPFwdY, p.WPFwdZ = fwd.x, fwd.y, fwd.z
     local rt = p:GetRight()
@@ -254,7 +262,7 @@ local function getSortedPortals(portals, camX, camY, camZ, fwdX, fwdY, fwdZ)
     local n = #portals
     for i = 1, n do
         local p = portals[i]
-        cachePortalScalars(p)
+        cachePortalPos(p)
         local dx = p.WPPosX - camX
         local dy = p.WPPosY - camY
         local dz = p.WPPosZ - camZ
