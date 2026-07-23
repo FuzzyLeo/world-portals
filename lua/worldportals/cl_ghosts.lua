@@ -269,6 +269,9 @@ local function makeOriginalOverride(rec)
         end
         if rec.savedRenderOverride then
             rec.savedRenderOverride(self, flags)
+        elseif self.Draw then
+            -- RenderOverride stands in for ENT:Draw, so a scripted entity has to be sent back through it.
+            self:Draw(flags)
         else
             self:DrawModel(flags)
         end
